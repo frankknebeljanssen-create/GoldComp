@@ -6,6 +6,7 @@
 #include <cmath>
 #include <vector>
 #include <array>
+#include <atomic>
 
 class RVoxCompressor
 {
@@ -124,7 +125,7 @@ public:
         grHistory.fill(0.0f);
         inputHistory.fill(-100.0f);
         outputHistory.fill(-100.0f);
-        grHistoryWritePos = 0;
+        grHistoryWritePos.store(0, std::memory_order_release);
         grHistorySampleCounter = 0;
         grHistoryBlockAccum = 0.0f;
         inputHistoryBlockAccum = -100.0f;
@@ -490,14 +491,17 @@ public:
     float getGainReductionDB() const { return smoothGR; }
     int getLatencySamples() const { return lookahead; }
     const std::array<float, GR_HISTORY_SIZE>& getGRHistory() const { return grHistory; }
-    int getGRHistoryWritePos() const { return grHistoryWritePos; }
+    int getGRHistoryWritePos() const { return grHistoryWritePos.load(std::memory_order_acquire); }
 
     // Public for OS mode switch state preservation
     float smoothGR = 0.0f;
     std::array<float, GR_HISTORY_SIZE> grHistory {};
     std::array<float, GR_HISTORY_SIZE> inputHistory {};
     std::array<float, GR_HISTORY_SIZE> outputHistory {};  // input - GR for before/after display
-    int grHistoryWritePos = 0;
+    // Read by the editor's 60 Hz timer while the audio thread writes it. Atomic
+    // with release/acquire so the compiler cannot cache or reorder it — with LTO
+    // enabled a plain int could be hoisted out of the paint loop entirely.
+    std::atomic<int> grHistoryWritePos { 0 };
     bool characterMode = false;  // true = CHARACTER (warmth+transformer+presence), false = CLEAN
 
 private:
@@ -553,10 +557,11 @@ private:
         outputHistoryBlockAccum = std::max(outputHistoryBlockAccum, outDB);
         grHistorySampleCounter++;
         if (grHistorySampleCounter >= grHistorySamplesPerSlot) {
-            grHistory[grHistoryWritePos] = grHistoryBlockAccum;
-            inputHistory[grHistoryWritePos] = inputHistoryBlockAccum;
-            outputHistory[grHistoryWritePos] = outputHistoryBlockAccum;
-            grHistoryWritePos = (grHistoryWritePos + 1) % GR_HISTORY_SIZE;
+            const int wp = grHistoryWritePos.load(std::memory_order_relaxed);
+            grHistory[(size_t)wp] = grHistoryBlockAccum;
+            inputHistory[(size_t)wp] = inputHistoryBlockAccum;
+            outputHistory[(size_t)wp] = outputHistoryBlockAccum;
+            grHistoryWritePos.store((wp + 1) % GR_HISTORY_SIZE, std::memory_order_release);
             grHistorySampleCounter = 0;
             grHistoryBlockAccum = 0.0f;
             inputHistoryBlockAccum = -100.0f;

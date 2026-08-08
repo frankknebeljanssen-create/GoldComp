@@ -128,6 +128,7 @@ void GoldCompProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     // output jumped.
     fadeFromL.assign((size_t)samplesPerBlock, 0.0f);
     fadeFromR.assign((size_t)samplesPerBlock, 0.0f);
+    monoScratch.assign((size_t)samplesPerBlock, 0.0f);
 
     // Force the signal HPF to redesign its coefficients. Without this the knob
     // deadband below keeps the *previous* sample rate's coefficients, so after a
@@ -143,6 +144,8 @@ void GoldCompProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     prevMixWet = 1.0f;
     prevOutTrimLin = 1.0f;
     smoothedMakeupGR = 0.0f;
+    smoothedHpfFreq = 0.0f;
+    smoothedClipAmt = 0.0f;
     dcBlockL = dcBlockR = dcPrevInL = dcPrevInR = 0.0f;
     prevBypassed = false;
 
@@ -161,7 +164,6 @@ void GoldCompProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     // De-click: slow envelope for "normal level" tracking
     // Attack: ~5ms (doesn't follow transients — they exceed the envelope)
     // Release: ~20ms (holds level between syllables)
-    dcAttCoeff = std::exp(-1.0f / (float)(sampleRate * 0.005));
     dcRelCoeff = std::exp(-1.0f / (float)(sampleRate * 0.005));  // same as attack for smooth tracking
     dcSlowRelCoeff = std::exp(-1.0f / (float)(sampleRate * 0.020));
     dcEnvL = 0.0f; dcEnvR = 0.0f;
@@ -186,8 +188,16 @@ void GoldCompProcessor::releaseResources()
 
 bool GoldCompProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
 {
-    return layouts.getMainOutputChannelSet() == juce::AudioChannelSet::stereo()
-        && layouts.getMainInputChannelSet() == juce::AudioChannelSet::stereo();
+    const auto in  = layouts.getMainInputChannelSet();
+    const auto out = layouts.getMainOutputChannelSet();
+    if (in.isDisabled() || out.isDisabled())
+        return false;
+    // Mono is allowed now. Stereo-only meant Logic would not offer the AU on
+    // mono tracks, which is the primary case for a vocal compressor.
+    const bool inOK  = in  == juce::AudioChannelSet::mono() || in  == juce::AudioChannelSet::stereo();
+    const bool outOK = out == juce::AudioChannelSet::mono() || out == juce::AudioChannelSet::stereo();
+    // Never fewer output channels than input
+    return inOK && outOK && out.size() >= in.size();
 }
 
 // Writes RBJ high-pass coefficients into an existing Coefficients object.
@@ -244,9 +254,16 @@ float GoldCompProcessor::softClipNormalized(float sample, float amount,
 void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
-    for (auto i = getTotalNumInputChannels(); i < getTotalNumOutputChannels(); ++i)
-        buffer.clear(i, 0, buffer.getNumSamples());
-    if (buffer.getNumChannels() < 2) return;
+    if (buffer.getNumChannels() < 1) return;
+
+    // Mono in, stereo out: mirror channel 0 rather than leaving channel 1 silent.
+    // The stock "clear the extra outputs" idiom would leave the detector summing
+    // signal against silence and reading 6 dB low.
+    if (getTotalNumInputChannels() < 2 && buffer.getNumChannels() >= 2)
+        buffer.copyFrom(1, 0, buffer, 0, 0, buffer.getNumSamples());
+    else
+        for (auto i = getTotalNumInputChannels(); i < getTotalNumOutputChannels(); ++i)
+            buffer.clear(i, 0, buffer.getNumSamples());
 
     int numSamples = buffer.getNumSamples();
     if (numSamples == 0) return;
@@ -254,8 +271,20 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     // A host handing us more would overrun the oversamplers' internal buffers,
     // which JUCE only guards with a jassert that compiles out in Release.
     numSamples = juce::jmin(numSamples, preparedBlockSize);
-    float* left = buffer.getWritePointer(0);
-    float* right = buffer.getWritePointer(1);
+    // The chain is stereo throughout. On a mono track we mirror the single
+    // channel into scratch, process as dual mono, and hand back channel 0 —
+    // cheaper and far less error-prone than making every stage channel-count
+    // aware, and the result is identical because both sides see the same input.
+    const bool isMono = buffer.getNumChannels() < 2;
+    float* left  = buffer.getWritePointer(0);
+    float* right = nullptr;
+    if (isMono) {
+        if ((int)monoScratch.size() < numSamples) return;   // not prepared yet
+        std::copy(left, left + numSamples, monoScratch.begin());
+        right = monoScratch.data();
+    } else {
+        right = buffer.getWritePointer(1);
+    }
 
     // Sanitize the input before anything recursive touches it. A single NaN or
     // Inf sample would otherwise poison the envelope followers, DC blocker and
@@ -319,6 +348,20 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     float mixAmt   = apvts.getRawParameterValue("mix")->load() / 100.0f;
     float inTrimDB = apvts.getRawParameterValue("inTrim")->load();
 
+    // Smooth the two parameters that otherwise change discontinuously at block
+    // boundaries: the HPF swaps coefficients on a stateful IIR, and Clip feeds
+    // both a waveshaper drive and a wet/dry blend. ~30 ms turns a sweep into a
+    // glide instead of a staircase.
+    {
+        const float pSmooth = std::exp(-(float)numSamples / (float)(currentSampleRate * 0.030));
+        smoothedHpfFreq = smoothedHpfFreq * pSmooth + hpfFreq * (1.0f - pSmooth);
+        if (! std::isfinite(smoothedHpfFreq)) smoothedHpfFreq = hpfFreq;
+        // Snap to the endpoints so "off" is really off and the top of the range
+        // is reachable
+        if (std::abs(hpfFreq - smoothedHpfFreq) < 0.05f) smoothedHpfFreq = hpfFreq;
+        hpfFreq = smoothedHpfFreq;
+    }
+
     // Input metering + K-weighted LUFS
     float inPL = 0, inPR = 0, inKSumSq = 0;
     for (int i = 0; i < numSamples; ++i) {
@@ -368,7 +411,7 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
         // Breaths (-30 to -40dB) and pauses are ignored — sweet spot stays stable
         bool isActive = peakDB > -35.0f;
 
-        analysisBlockCount++;
+        if (analysisBlockCount < 1000000) analysisBlockCount++;
         int learnBlocks = (int)(currentSampleRate * 1.0 / (double)numSamples);
         float smoothCoeff = analysisBlockCount < learnBlocks ? 0.12f : 0.03f;
 
@@ -582,10 +625,11 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
                 float absL = std::abs(left[i]);
                 float absR = std::abs(right[i]);
 
-                // Slow envelope: tracks sustained level, ignores transients
-                // Attack ~2ms (fast enough to follow speech), Release ~15ms
-                float slowAttack = dcRelCoeff;   // ~2ms (reuse rel coeff)
-                float slowRelease = dcSlowRelCoeff;  // ~15ms
+                // Slow envelope: tracks sustained level, ignores transients.
+                // 5 ms up, 20 ms down — the old comments said 2/15 ms but the
+                // coefficients in prepareToPlay were always 5/20.
+                float slowAttack = dcRelCoeff;
+                float slowRelease = dcSlowRelCoeff;
 
                 dcEnvL = (absL > dcEnvL) ? slowAttack * dcEnvL + (1.0f - slowAttack) * absL
                                          : slowRelease * dcEnvL + (1.0f - slowRelease) * absL;
@@ -596,14 +640,21 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
                 float ceilL = juce::jmax(dcEnvL * 1.6f, 0.002f);
                 float ceilR = juce::jmax(dcEnvR * 1.6f, 0.002f);
 
-                // Hard soft-clip: tanh with steep curve
+                // Soft knee with a continuous derivative. The 0.15 factor here
+                // used to leave the slope dropping from 1 to 0.3 at the knee —
+                // a 70% break, which radiates harmonics falling off only as
+                // 1/n^2, and at base rate everything above about the 7th order
+                // folds back. On sibilants that is audible grit from a stage
+                // called De-Click. Scaling by the same 0.5 as the `over`
+                // denominator makes the slope exactly 1 at the knee, so the
+                // harmonics fall as 1/n^3 instead.
                 if (absL > ceilL) {
                     float over = (absL - ceilL) / (ceilL * 0.5f);
-                    left[i] = (left[i] > 0 ? 1.0f : -1.0f) * (ceilL + std::tanh(over) * ceilL * 0.15f);
+                    left[i] = (left[i] > 0 ? 1.0f : -1.0f) * (ceilL + std::tanh(over) * ceilL * 0.5f);
                 }
                 if (absR > ceilR) {
                     float over = (absR - ceilR) / (ceilR * 0.5f);
-                    right[i] = (right[i] > 0 ? 1.0f : -1.0f) * (ceilR + std::tanh(over) * ceilR * 0.15f);
+                    right[i] = (right[i] > 0 ? 1.0f : -1.0f) * (ceilR + std::tanh(over) * ceilR * 0.5f);
                 }
             }
         }
@@ -706,7 +757,14 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
             // mid-stream and dump the oversampler's stale IIR state into the
             // signal. With clipAmt at 0 the waveshaper is an identity, so this
             // only costs the up/down conversion.
-            float clipAmt = apvts.getRawParameterValue("clip")->load() / 100.0f;
+            float clipTarget = apvts.getRawParameterValue("clip")->load() / 100.0f;
+            {
+                const float pSmooth = std::exp(-(float)numSamples / (float)(currentSampleRate * 0.030));
+                smoothedClipAmt = smoothedClipAmt * pSmooth + clipTarget * (1.0f - pSmooth);
+                if (! std::isfinite(smoothedClipAmt)) smoothedClipAmt = clipTarget;
+                if (std::abs(clipTarget - smoothedClipAmt) < 0.0005f) smoothedClipAmt = clipTarget;
+            }
+            const float clipAmt = smoothedClipAmt;
             {
                 juce::dsp::AudioBlock<float> block(buffer);
                 auto osBlock = oversampler.processSamplesUp(block);

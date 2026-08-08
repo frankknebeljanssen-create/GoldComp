@@ -102,6 +102,7 @@ private:
 
     bool prevBypassed = false;  // for bypass crossfade
     std::vector<float> fadeFromL, fadeFromR;   // crossfade source, preallocated
+    std::vector<float> monoScratch;             // right channel when fed mono
 
     std::vector<float> dryDelayL, dryDelayR;      // post-trim, feeds the Mix control
     int dryDelayWritePos = 0;
@@ -121,6 +122,8 @@ private:
     float prevMixWet = 1.0f;
     float prevOutTrimLin = 1.0f;
     float smoothedMakeupGR = 0.0f;   // slow average of delivered GR, drives makeup
+    float smoothedHpfFreq = 0.0f;    // anti-zipper for the HPF coefficient swap
+    float smoothedClipAmt = 0.0f;    // anti-zipper for the clipper drive/blend
 
     // K-weighted loudness (LUFS) for gain match
     // Stage 1: high-shelf +4dB @ 1681Hz (pre-filter)
@@ -143,7 +146,7 @@ private:
 
     // De-click: envelope for transient detection
     float dcEnvL = 0.0f, dcEnvR = 0.0f;
-    float dcAttCoeff = 0.0f, dcRelCoeff = 0.0f, dcSlowRelCoeff = 0.0f;
+    float dcRelCoeff = 0.0f, dcSlowRelCoeff = 0.0f;
 
     // RIDE: auto-leveling — slow RMS tracker that adjusts comp offset
     float rideEnvDB = -60.0f;           // slow RMS envelope (~3 sec)
