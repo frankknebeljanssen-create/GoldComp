@@ -71,8 +71,6 @@ juce::AudioProcessorValueTreeState::ParameterLayout GoldCompProcessor::createPar
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("transProtect", 1), "Trans Protect",
         juce::NormalisableRange<float>(0.0f, 100.0f, 1.0f), 55.0f));
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID("character", 1), "Character", true));  // on by default
     return { params.begin(), params.end() };
 }
 
@@ -507,9 +505,6 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
 
         // Sidechain HPF: filters detector only, bass passes through to output
         compressor.setScHpfFreq(scHpFreq);
-
-        // Character mode toggle
-        compressor.characterMode = apvts.getRawParameterValue("character")->load() > 0.5f;
 
         // Delta mode: compressor outputs what compression removes instead of compressed signal
         bool isDelta = deltaMode.load() && compDB < -0.5f;

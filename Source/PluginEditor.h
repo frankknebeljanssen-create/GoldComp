@@ -8,7 +8,10 @@ public:
     explicit GoldCompEditor(GoldCompProcessor&);
     ~GoldCompEditor() override;
     void paint(juce::Graphics&) override;
+    void paintOverChildren(juce::Graphics&) override;
     void resized() override;
+    // Blocks knob/button clicks while the credits overlay covers them
+    void setControlsInteractive(bool);
     void timerCallback() override;
     void mouseDown(const juce::MouseEvent&) override;
     void mouseDrag(const juce::MouseEvent&) override;
@@ -49,7 +52,6 @@ public:
     juce::Rectangle<int> honestBtnRect;
     juce::Rectangle<int> clipPillRect;
     juce::Rectangle<int> deClickRect;
-    juce::Rectangle<int> charRect;
     juce::Rectangle<int> grBarRect, grTimelineRect, vocalStateRect;
     bool grTimelineFast = false;  // false=slow (full history), true=fast (zoomed in)
     juce::Rectangle<int> grSpeedToggleRect;
@@ -106,7 +108,7 @@ public:
     // A/B comparison
     bool abState = false;
     juce::Rectangle<int> abBtnRect, deltaBtnRect, rideRect;
-    struct ABSlot { float comp=0, gate=-80, gain=0, hpf=0, mix=100, clip=0, inTrim=0, schpf=0; bool character=true; };
+    struct ABSlot { float comp=0, gate=-80, gain=0, hpf=0, mix=100, clip=0, inTrim=0, schpf=0; };
     ABSlot slotA, slotB;
     void storeCurrentToSlot(ABSlot& slot);
     void loadSlotToCurrent(const ABSlot& slot);

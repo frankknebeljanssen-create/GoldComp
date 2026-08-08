@@ -469,7 +469,7 @@ public:
     std::array<float, GR_HISTORY_SIZE> inputHistory {};
     std::array<float, GR_HISTORY_SIZE> outputHistory {};  // input - GR for before/after display
     int grHistoryWritePos = 0;
-    bool characterMode = true;  // true = CHARACTER (warmth+transformer+presence), false = CLEAN
+    bool characterMode = false;  // true = CHARACTER (warmth+transformer+presence), false = CLEAN
 
 private:
     // Warm soft-knee with smoothstep S-curve

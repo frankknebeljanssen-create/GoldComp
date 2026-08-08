@@ -1,43 +1,27 @@
 #!/bin/bash
 set -e
 
-SOURCE_DIR="$HOME/Dropbox/plugin development/GoldComp"
-PLUGIN_DIR="$HOME/Dropbox/plugin sandbox"
-BUILD_DIR="$HOME/Downloads/GoldComp-build"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_DIR="$HOME/Library/Audio/Plug-Ins/VST3"
+# Build dir and JUCE checkout live outside Dropbox — syncing them causes
+# CMake cache conflicts and pointless upload traffic.
+BUILD_DIR="$HOME/Library/Caches/GoldComp-build"
+JUCE_DIR="$HOME/Library/Caches/GoldComp-juce"
 
-# Find latest zip by version number (highest vXXX)
-ZIP=$(ls "$SOURCE_DIR"/GoldComp_v*.zip 2>/dev/null | sort -V | tail -1)
-if [ -z "$ZIP" ]; then
-    # Fallback: any GoldComp zip
-    ZIP=$(ls -t "$SOURCE_DIR"/GoldComp*.zip 2>/dev/null | head -1)
-fi
-if [ -z "$ZIP" ]; then
-    echo "No GoldComp*.zip found in $SOURCE_DIR"
-    exit 1
-fi
-echo "=== Building from: $ZIP ==="
-
-# Clean and unzip to build dir
-rm -rf "$BUILD_DIR"
-mkdir -p "$BUILD_DIR"
-unzip -o "$ZIP" -d "$BUILD_DIR"
-cd "$BUILD_DIR/GoldComp"
-
-if [ ! -d "JUCE" ]; then
-    echo "Downloading JUCE..."
-    git clone --depth 1 https://github.com/juce-framework/JUCE.git
+if [ ! -d "$JUCE_DIR" ]; then
+    echo "Downloading JUCE to $JUCE_DIR ..."
+    git clone --depth 1 https://github.com/juce-framework/JUCE.git "$JUCE_DIR"
 fi
 
-mkdir -p build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build . --config Release --parallel 8
+cmake -S "$REPO_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -DJUCE_PATH="$JUCE_DIR"
+cmake --build "$BUILD_DIR" --config Release --parallel 8
 
 mkdir -p "$PLUGIN_DIR"
-cp -R GoldComp_artefacts/Release/VST3/GoldComp.vst3 "$PLUGIN_DIR/"
+rm -rf "$PLUGIN_DIR/GoldComp.vst3"
+cp -R "$BUILD_DIR/GoldComp_artefacts/Release/VST3/GoldComp.vst3" "$PLUGIN_DIR/"
 xattr -cr "$PLUGIN_DIR/GoldComp.vst3"
 codesign --force --deep --sign - "$PLUGIN_DIR/GoldComp.vst3"
 
 echo ""
 echo "=== GoldComp installed to: $PLUGIN_DIR ==="
-echo "Built from: $ZIP"
-echo "Restart Ableton to load the plugin."
+echo "Rescan or restart Ableton to load the plugin."

@@ -5,8 +5,9 @@ project(GoldComp VERSION 1.0.0)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# JUCE Framework
-add_subdirectory(JUCE)
+# JUCE Framework — kept outside the repo (and outside Dropbox) by default
+set(JUCE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/JUCE" CACHE PATH "Path to the JUCE checkout")
+add_subdirectory("${JUCE_PATH}" "${CMAKE_BINARY_DIR}/JUCE")
 
 juce_add_plugin(GoldComp
     COMPANY_NAME "Frank Knebel"

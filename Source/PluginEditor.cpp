@@ -269,7 +269,7 @@ GoldCompEditor::GoldCompEditor(GoldCompProcessor& p)
         }
         lastCompValue = v;
     };
-    setup(gateSlider, gateLabel, "Gate", "GATE");
+    setup(inTrimSlider, inTrimLabel, "In Trim", "IN TRIM");
     setup(gainSlider, gainLabel, "Gain", "OUT GAIN");
     setup(hpfSlider, hpfLabel, "HP Filter", "HPF");
     setup(clipSlider, clipLabel, "Soft Clip", "CLIP");
@@ -277,7 +277,7 @@ GoldCompEditor::GoldCompEditor(GoldCompProcessor& p)
 
     // Double-click reset
     compSlider.setDoubleClickReturnValue(true, 0.0f);
-    gateSlider.setDoubleClickReturnValue(true, -80.0f);
+    inTrimSlider.setDoubleClickReturnValue(true, 0.0f);
     gainSlider.setDoubleClickReturnValue(true, 0.0f);
     hpfSlider.setDoubleClickReturnValue(true, 0.0f);
     mixSlider.setDoubleClickReturnValue(true, 100.0f);
@@ -285,6 +285,7 @@ GoldCompEditor::GoldCompEditor(GoldCompProcessor& p)
     // Attachments
     compAttach  = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.apvts, "comp",  compSlider);
     gateAttach  = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.apvts, "gate",  gateSlider);
+    inTrimAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.apvts, "inTrim", inTrimSlider);
     gainAttach  = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.apvts, "gain",  gainSlider);
     hpfAttach   = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.apvts, "hpf",   hpfSlider);
     clipAttach  = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.apvts, "clip",  clipSlider);
@@ -315,9 +316,8 @@ GoldCompEditor::GoldCompEditor(GoldCompProcessor& p)
         addAndMakeVisible(l); l.setVisible(false);
     };
 
-    setupAdv(inTrimSlider, inTrimLabel, "In Trim", "IN TRIM");
-    inTrimAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.apvts, "inTrim", inTrimSlider);
-    inTrimSlider.setDoubleClickReturnValue(true, 0.0f);
+    setupAdv(gateSlider, gateLabel, "Gate", "GATE");
+    gateSlider.setDoubleClickReturnValue(true, -80.0f);
 
     setupAdv(scHpfSlider, scHpfLabel, "SC HPF", "SC HPF");
     scHpfAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.apvts, "schpf", scHpfSlider);
@@ -418,7 +418,8 @@ void GoldCompEditor::timerCallback()
     if (advOpen) {
         float hpfVal = processor.apvts.getRawParameterValue("hpf")->load();
 
-        inTrimLabel.setText("dB", juce::dontSendNotification);
+        float gateVal = processor.apvts.getRawParameterValue("gate")->load();
+        gateLabel.setText(gateVal <= -79.5f ? "OFF" : "dB", juce::dontSendNotification);
         hpfLabel.setText(hpfVal < 1.0f ? "OFF" : "Hz", juce::dontSendNotification);
         float scHpfVal = processor.apvts.getRawParameterValue("schpf")->load();
         scHpfLabel.setText(scHpfVal < 1.0f ? "OFF" : "Hz", juce::dontSendNotification);
@@ -432,11 +433,11 @@ void GoldCompEditor::timerCallback()
         auto bp = unscalePt(p);              // base-coordinate position (for manually drawn rects)
         if (getLocalBounds().contains(p)) {
             if (compSlider.getBounds().contains(p)) hoveredElement = "comp";
-            else if (gateSlider.getBounds().contains(p)) hoveredElement = "gate";
+            else if (inTrimSlider.getBounds().contains(p)) hoveredElement = "intrim";
             else if (gainSlider.getBounds().contains(p)) hoveredElement = "gain";
             else if (hpfSlider.isVisible() && hpfSlider.getBounds().contains(p)) hoveredElement = "hpf";
             else if (mixSlider.getBounds().contains(p)) hoveredElement = "mix";
-            else if (inTrimSlider.isVisible() && inTrimSlider.getBounds().contains(p)) hoveredElement = "intrim";
+            else if (gateSlider.isVisible() && gateSlider.getBounds().contains(p)) hoveredElement = "gate";
             else if (scHpfSlider.isVisible() && scHpfSlider.getBounds().contains(p)) hoveredElement = "schpf";
             else if (honestBtnRect.contains(bp)) hoveredElement = "true";
             else if (abBtnRect.contains(bp)) hoveredElement = "ab";
@@ -446,7 +447,6 @@ void GoldCompEditor::timerCallback()
             else if (loadBtnRect.contains(bp)) hoveredElement = "load";
             else if (clipPillRect.contains(bp)) hoveredElement = "clip";
             else if (deClickRect.contains(bp)) hoveredElement = "dclk";
-            else if (charRect.contains(bp)) hoveredElement = "char";
             else if (advToggleRect.contains(bp)) hoveredElement = "adv";
             else if (grBarRect.contains(bp)) hoveredElement = "gr";
             else if (grTimelineRect.contains(bp)) hoveredElement = "grtimeline";
@@ -479,8 +479,8 @@ void GoldCompEditor::mouseDown(const juce::MouseEvent& e)
 {
     auto bp = unscalePt(e.getPosition());  // base-coordinate mouse position
 
-    if (showInfo) { showInfo = false; repaint(); return; }
-    if (logoRect.contains(bp)) { showInfo = true; repaint(); return; }
+    if (showInfo) { showInfo = false; setControlsInteractive(true); repaint(); return; }
+    if (logoRect.contains(bp)) { showInfo = true; setControlsInteractive(false); repaint(); return; }
 
     // Info mode toggle
     if (infoBtnRect.contains(bp)) {
@@ -546,13 +546,6 @@ void GoldCompEditor::mouseDown(const juce::MouseEvent& e)
     // DE-CLICK toggle
     if (deClickRect.contains(bp)) {
         processor.deClickMode.store(!processor.deClickMode.load());
-        repaint(); return;
-    }
-
-    // CHARACTER toggle
-    if (charRect.contains(bp)) {
-        bool cur = processor.apvts.getRawParameterValue("character")->load() > 0.5f;
-        processor.apvts.getParameter("character")->setValueNotifyingHost(cur ? 0.0f : 1.0f);
         repaint(); return;
     }
 
@@ -1000,14 +993,13 @@ void GoldCompEditor::paint(juce::Graphics& g)
         abBtnRect = {};
     }
 
-    // CLIP + DE-CLICK + CHAR buttons — right side, stacked
+    // CLIP + DE-CLICK buttons — right side, stacked
     {
         bool clipOn = processor.apvts.getRawParameterValue("clip")->load() > 1.0f;
         bool dcOn = processor.deClickMode.load();
-        bool charOn = processor.apvts.getRawParameterValue("character")->load() > 0.5f;
         int pillW2 = 46, pillH2 = 20, pillGap2 = 4;
         int pillX2 = w - 16 - 12 - pillW2;
-        int pillY2 = kcY + (kcH - pillH2 * 3 - pillGap2 * 2) / 2 + 6;
+        int pillY2 = kcY + (kcH - pillH2 * 2 - pillGap2) / 2 + 6;
 
         // CLIP
         float clipAct = clipOn ? processor.clipActivity.load() : 0.0f;
@@ -1033,16 +1025,6 @@ void GoldCompEditor::paint(juce::Graphics& g)
         g.setFont(juce::Font("Arial", 9.0f, juce::Font::bold));
         g.setColour(dcOn ? C::accent : C::label);
         g.drawText("D-CLK", deClickRect, juce::Justification::centred);
-
-        // CHARACTER toggle
-        charRect = juce::Rectangle<int>(pillX2, pillY2 + (pillH2 + pillGap2) * 2, pillW2, pillH2);
-        g.setColour(charOn ? juce::Colour(0xff2a1f3a) : juce::Colour(0xff1e2330));
-        g.fillRoundedRectangle(charRect.toFloat(), 5.0f);
-        g.setColour(charOn ? juce::Colour(0xffa070d0).withAlpha(0.7f) : juce::Colour(0xff444a58));
-        g.drawRoundedRectangle(charRect.toFloat(), 5.0f, 1.0f);
-        g.setFont(juce::Font("Arial", 9.0f, juce::Font::bold));
-        g.setColour(charOn ? juce::Colour(0xffa070d0) : C::label);
-        g.drawText("CHAR", charRect, juce::Justification::centred);
     }
 
     // === GR TIMELINE + ADV PANEL (both inside collapsible ADV) ===
@@ -1141,18 +1123,18 @@ void GoldCompEditor::paint(juce::Graphics& g)
         int row1Y = knobTopY;
         g.setFont(juce::Font("Arial", 10.0f, juce::Font::bold));
         g.setColour(C::label.brighter(0.3f));
-        g.drawText("IN TRIM", knobAreaLeft, row1Y - 14, col3W, 12, juce::Justification::centred);
+        g.drawText("GATE", knobAreaLeft, row1Y - 14, col3W, 12, juce::Justification::centred);
         g.drawText("HPF", knobAreaLeft + col3W, row1Y - 14, col3W, 12, juce::Justification::centred);
         g.drawText("SC HPF", knobAreaLeft + col3W * 2, row1Y - 14, col3W, 12, juce::Justification::centred);
 
         hpfSlider.setVisible(true); hpfLabel.setVisible(true);
-        inTrimSlider.setVisible(true); inTrimLabel.setVisible(true);
+        gateSlider.setVisible(true); gateLabel.setVisible(true);
         scHpfSlider.setVisible(true); scHpfLabel.setVisible(true);
     }
     else
     {
         hpfSlider.setVisible(false); hpfLabel.setVisible(false);
-        inTrimSlider.setVisible(false); inTrimLabel.setVisible(false);
+        gateSlider.setVisible(false); gateLabel.setVisible(false);
         scHpfSlider.setVisible(false); scHpfLabel.setVisible(false);
     }
 
@@ -1182,24 +1164,7 @@ void GoldCompEditor::paint(juce::Graphics& g)
         g.drawText("BYPASS", 0, 0, w, h, juce::Justification::centred);
     }
 
-    // === INFO OVERLAY ===
-    if (showInfo) {
-        g.setColour(juce::Colour(0xe0080a10)); g.fillRect(0, 0, w, h);
-        auto baseBounds = juce::Rectangle<float>(0, 0, (float)w, (float)h);
-        auto oc = baseBounds.withSizeKeepingCentre(230, 160);
-        g.setColour(C::card); g.fillRoundedRectangle(oc, 8.0f);
-        g.setColour(C::border); g.drawRoundedRectangle(oc, 8.0f, 1.0f);
-        float cy = oc.getY() + 16;
-        g.setFont(juce::Font("Arial", 20.0f, juce::Font::bold));
-        g.setColour(C::accent); g.drawText("GOLD", (int)oc.getX(), (int)cy, (int)oc.getWidth(), 20, juce::Justification::centred);
-        g.setColour(C::white); g.drawText("COMP", (int)oc.getX(), (int)(cy + 24), (int)oc.getWidth(), 20, juce::Justification::centred);
-        g.setFont(juce::Font("Arial", 11.0f, juce::Font::plain)); g.setColour(C::label);
-        g.drawText("Thomas Gold Audio Products", (int)oc.getX(), (int)(cy + 60), (int)oc.getWidth(), 14, juce::Justification::centred);
-        g.setColour(C::dim);
-        g.drawText(juce::CharPointer_UTF8("\xc2\xa9 2026"), (int)oc.getX(), (int)(cy + 76), (int)oc.getWidth(), 14, juce::Justification::centred);
-        g.setFont(juce::Font("Arial", 9.0f, juce::Font::plain)); g.setColour(C::dim);
-        g.drawText("Click anywhere to close", (int)oc.getX(), (int)(cy + 110), (int)oc.getWidth(), 12, juce::Justification::centred);
-    }
+    // === INFO OVERLAY — drawn in paintOverChildren() so it covers the knobs ===
 
     // === TOOLTIP — painted LAST, always on top of everything ===
     if (infoMode && hoveredElement.isNotEmpty())
@@ -1243,7 +1208,6 @@ void GoldCompEditor::paint(juce::Graphics& g)
             else if (hoveredElement == "load") elBounds = loadBtnRect;
             else if (hoveredElement == "clip") elBounds = clipPillRect;
             else if (hoveredElement == "dclk") elBounds = deClickRect;
-            else if (hoveredElement == "char") elBounds = charRect;
             else if (hoveredElement == "adv") elBounds = advToggleRect;
             else if (hoveredElement == "gr") elBounds = grBarRect;
             else if (hoveredElement == "grtimeline") elBounds = grTimelineRect;
@@ -1304,7 +1268,6 @@ void GoldCompEditor::paint(juce::Graphics& g)
         bool isDelta = processor.deltaMode.load();
         bool clipOn2 = processor.apvts.getRawParameterValue("clip")->load() > 1.0f;
         bool dcOn2 = processor.deClickMode.load();
-        bool charOn2 = processor.apvts.getRawParameterValue("character")->load() > 0.5f;
 
         // Left pills
         drawPill(deltaBtnRect, juce::CharPointer_UTF8("\xce\x94"), isDelta, C::clipCol);
@@ -1314,9 +1277,44 @@ void GoldCompEditor::paint(juce::Graphics& g)
         // Right pills
         drawPill(clipPillRect, "CLIP", clipOn2, C::clipCol);
         drawPill(deClickRect, "D-CLK", dcOn2, C::accent);
-        drawPill(charRect, "CHAR", charOn2, juce::Colour(0xffa070d0));
     }
 }
+
+// ============== INFO OVERLAY ==============
+void GoldCompEditor::setControlsInteractive(bool on)
+{
+    for (auto* s : { &compSlider, &gateSlider, &gainSlider, &hpfSlider,
+                     &clipSlider, &mixSlider, &inTrimSlider, &scHpfSlider })
+        s->setInterceptsMouseClicks(on, on);
+    bypassBtn.setInterceptsMouseClicks(on, on);
+}
+
+// Painted after child components so it covers the knobs (In Trim, Mix, Out).
+void GoldCompEditor::paintOverChildren(juce::Graphics& g)
+{
+    if (!showInfo) return;
+
+    g.addTransform(juce::AffineTransform::scale(getScale()));
+    int w = L.w;
+    int h = getBaseHeight() + (advOpen ? ADV_PANEL_H + 12 : 0);
+
+    g.setColour(juce::Colour(0xe0080a10)); g.fillRect(0, 0, w, h);
+    auto baseBounds = juce::Rectangle<float>(0, 0, (float)w, (float)h);
+    auto oc = baseBounds.withSizeKeepingCentre(230, 160);
+    g.setColour(C::card); g.fillRoundedRectangle(oc, 8.0f);
+    g.setColour(C::border); g.drawRoundedRectangle(oc, 8.0f, 1.0f);
+    float cy = oc.getY() + 16;
+    g.setFont(juce::Font("Arial", 20.0f, juce::Font::bold));
+    g.setColour(C::accent); g.drawText("GOLD", (int)oc.getX(), (int)cy, (int)oc.getWidth(), 20, juce::Justification::centred);
+    g.setColour(C::white); g.drawText("COMP", (int)oc.getX(), (int)(cy + 24), (int)oc.getWidth(), 20, juce::Justification::centred);
+    g.setFont(juce::Font("Arial", 11.0f, juce::Font::plain)); g.setColour(C::label);
+    g.drawText("Frank Knebel-Janssen", (int)oc.getX(), (int)(cy + 60), (int)oc.getWidth(), 14, juce::Justification::centred);
+    g.setColour(C::dim);
+    g.drawText(juce::CharPointer_UTF8("\xc2\xa9 2026"), (int)oc.getX(), (int)(cy + 76), (int)oc.getWidth(), 14, juce::Justification::centred);
+    g.setFont(juce::Font("Arial", 9.0f, juce::Font::plain)); g.setColour(C::dim);
+    g.drawText("Click anywhere to close", (int)oc.getX(), (int)(cy + 110), (int)oc.getWidth(), 12, juce::Justification::centred);
+}
+
 // ============== BIG KNOB ==============
 void GoldCompEditor::drawBigKnob(juce::Graphics& g, int cx, int cy, int radius, float normVal, float grDB)
 {
@@ -1974,12 +1972,13 @@ void GoldCompEditor::resized()
         l.setBounds(S(kx - 10), S(kBaseY + knobSz + 2), S(knobSz + 20), S(14));
     };
 
-    placeKnob(gateSlider, gateLabel, 0);
+    placeKnob(inTrimSlider, inTrimLabel, 0);
     placeKnob(mixSlider, mixLabel, 1);
     placeKnob(gainSlider, gainLabel, 2);
 
     if (!advOpen) {
         hpfSlider.setVisible(false); hpfLabel.setVisible(false);
+        gateSlider.setVisible(false); gateLabel.setVisible(false);
     }
 
     // ADV panel
@@ -2004,10 +2003,11 @@ void GoldCompEditor::resized()
             l.setBounds(S(kx - 14), S(knobTopY + advKnobSz + 2), S(advKnobSz + 28), S(14));
         };
 
-        placeAdvKnob(inTrimSlider, inTrimLabel, 0);
+        placeAdvKnob(gateSlider, gateLabel, 0);
         placeAdvKnob(hpfSlider, hpfLabel, 1);
         placeAdvKnob(scHpfSlider, scHpfLabel, 2);
 
+        gateSlider.setVisible(true); gateLabel.setVisible(true);
         hpfSlider.setVisible(true); hpfLabel.setVisible(true);
         scHpfSlider.setVisible(true); scHpfLabel.setVisible(true);
     }
@@ -2024,7 +2024,6 @@ void GoldCompEditor::storeCurrentToSlot(ABSlot& slot)
     slot.clip = processor.apvts.getRawParameterValue("clip")->load();
     slot.inTrim = processor.apvts.getRawParameterValue("inTrim")->load();
     slot.schpf = processor.apvts.getRawParameterValue("schpf")->load();
-    slot.character = processor.apvts.getRawParameterValue("character")->load() > 0.5f;
 }
 
 void GoldCompEditor::loadSlotToCurrent(const ABSlot& slot)
@@ -2035,7 +2034,6 @@ void GoldCompEditor::loadSlotToCurrent(const ABSlot& slot)
     set("comp", slot.comp); set("gate", slot.gate); set("gain", slot.gain);
     set("hpf", slot.hpf); set("mix", slot.mix); set("clip", slot.clip);
     set("inTrim", slot.inTrim); set("schpf", slot.schpf);
-    processor.apvts.getParameter("character")->setValueNotifyingHost(slot.character ? 1.0f : 0.0f);
 }
 
 // ============== TOOLTIP INFO ==============
@@ -2169,18 +2167,6 @@ GoldCompEditor::TooltipInfo GoldCompEditor::getTooltipFor(const juce::String& el
         "Threshold: 4 dB above envelope (1.6× ratio)\n"
         "Limiter: tanh soft-clip on transients\n"
         "Position: before compressor in signal chain"
-    };
-    if (el == "char") return {
-        "Character Mode",
-        "Adds analog-style coloration to the compressed signal. "
-        "Includes 2nd harmonic warmth (tube-like), transformer EQ "
-        "(gentle bass tightening + treble softening), and vocal presence "
-        "boost (2-4 kHz). All effects scale with compression amount. "
-        "Disable for a mathematically clean compressor.",
-        "2nd harmonic: x + k·x² (k scales with comp)\n"
-        "Transformer LP: ~16 kHz rolloff | HP: ~25 Hz rolloff\n"
-        "Presence: ~3 kHz shelf, scales with comp\n"
-        "OFF = clean digital | ON = analog character"
     };
     if (el == "adv") return {
         "Advanced Panel",
