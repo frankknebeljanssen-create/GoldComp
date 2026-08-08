@@ -1,58 +1,63 @@
 #pragma once
 
 #include <juce_dsp/juce_dsp.h>
+#include "SlidingExtremum.h"
 #include <cmath>
 #include <vector>
 
 /**
- * LookaheadLimiter — Transparent brickwall peak limiter.
+ * LookaheadLimiter — brickwall peak limiter.
  *
- * Uses cosine-interpolated gain ramp across the lookahead window
- * for artifact-free limiting. Program-dependent release prevents
- * pumping on sustained material while recovering quickly from transients.
+ * The gain target is the lowest gain required anywhere in the lookahead window,
+ * so the ramp is already underway before the peak arrives; two one-pole stages
+ * turn that step into a smooth ramp. For this to actually hold the ceiling the
+ * smoothing has to settle *within* the lookahead window — the previous version
+ * had 0.8 ms of smoothing behind a 0.73 ms window and overshot by 3 dB, which
+ * left the un-oversampled safety clip downstream doing the real peak control.
  *
  * Design goal: invisible. If you can hear the limiter, it's too loud.
  */
 class LookaheadLimiter
 {
 public:
-    static constexpr int LIMITER_LOOKAHEAD = 32;
+    // Lookahead in seconds. Long enough that the smoothing below settles inside
+    // it, short enough to stay cheap in latency. Defined in time, not samples,
+    // so the limiter behaves identically at 44.1 and 192 kHz.
+    static constexpr float LOOKAHEAD_SECONDS = 0.002f;
 
     LookaheadLimiter() = default;
 
-    void prepare(double sampleRate, int /*maxBlockSize*/)
+    void prepare (double sampleRate, int /*maxBlockSize*/)
     {
         sr = sampleRate;
-        int bufSize = LIMITER_LOOKAHEAD + 1;
-        delayL.assign((size_t)bufSize, 0.0f);
-        delayR.assign((size_t)bufSize, 0.0f);
-        gainBuffer.assign((size_t)bufSize, 0.0f);
-        writePos = 0;
+        lookahead = std::max (8, (int) std::lround (sr * (double) LOOKAHEAD_SECONDS));
+
+        int bufSize = lookahead + 1;
+        delayL.assign ((size_t) bufSize, 0.0f);
+        delayR.assign ((size_t) bufSize, 0.0f);
+        gainMin.prepare (lookahead);
 
         // Release: two-stage program-dependent
-        relFastCoeff = std::exp(-1.0f / (float(sr) * 0.020f));   // 20ms fast
-        relSlowCoeff = std::exp(-1.0f / (float(sr) * 0.200f));   // 200ms slow
+        relFastCoeff = std::exp (-1.0f / (float (sr) * 0.020f));   // 20ms fast
+        relSlowCoeff = std::exp (-1.0f / (float (sr) * 0.200f));   // 200ms slow
 
-        // Lookahead gain smoothing (same approach as compressor)
-        smoothCoeff1 = std::exp(-1.0f / (float(sr) * 0.0003f));  // 0.3ms
-        smoothCoeff2 = std::exp(-1.0f / (float(sr) * 0.0008f));  // 0.8ms
+        // Gain smoothing, deliberately faster than the lookahead window so the
+        // ramp completes before the peak lands. Still slow enough to keep
+        // gain-modulation sidebands far down (~-59 dB at 20 kHz).
+        smoothCoeff1 = std::exp (-1.0f / (float (sr) * 0.00015f)); // 0.15ms
+        smoothCoeff2 = std::exp (-1.0f / (float (sr) * 0.00040f)); // 0.40ms
 
-        // GR meter ballistics — 2.3ms, matching the old hardcoded 0.99 at
-        // 44.1kHz but now correct at every sample rate
-        grMeterCoeff = std::exp(-1.0f / (float(sr) * 0.0023f));
+        // GR meter ballistics — 2.3ms, correct at every sample rate
+        grMeterCoeff = std::exp (-1.0f / (float (sr) * 0.0023f));
 
-        envelope = 0.0f;
-        prevAppliedGain = 1.0f;
-        smoothedGainDB = 0.0f;
-        smoothedGainDB2 = 0.0f;
-        currentGR = 0.0f;
+        reset();
     }
 
     void reset()
     {
-        std::fill(delayL.begin(), delayL.end(), 0.0f);
-        std::fill(delayR.begin(), delayR.end(), 0.0f);
-        std::fill(gainBuffer.begin(), gainBuffer.end(), 0.0f);
+        std::fill (delayL.begin(), delayL.end(), 0.0f);
+        std::fill (delayR.begin(), delayR.end(), 0.0f);
+        gainMin.reset (0.0f);
         writePos = 0;
         envelope = 0.0f;
         currentGR = 0.0f;
@@ -61,103 +66,76 @@ public:
         smoothedGainDB2 = 0.0f;
     }
 
-    void process(float* bufferL, float* bufferR, int numSamples, float ceilingDB)
+    void process (float* bufferL, float* bufferR, int numSamples, float ceilingDB)
     {
-        float ceilingLin = std::pow(10.0f, ceilingDB / 20.0f);
-        int bufSize = LIMITER_LOOKAHEAD + 1;
+        const float ceilingLin = std::pow (10.0f, ceilingDB / 20.0f);
+        const int bufSize = lookahead + 1;
 
         for (int i = 0; i < numSamples; ++i)
         {
-            float inL = bufferL[i];
-            float inR = bufferR[i];
+            delayL[(size_t) writePos] = bufferL[i];
+            delayR[(size_t) writePos] = bufferR[i];
 
-            // Write input to delay
-            delayL[(size_t)writePos] = inL;
-            delayR[(size_t)writePos] = inR;
+            float peak = std::max (std::abs (bufferL[i]), std::abs (bufferR[i]));
 
-            // Peak detection
-            float peak = std::max(std::abs(inL), std::abs(inR));
-
-            // Envelope: instant attack, program-dependent release
+            // Instant attack, program-dependent release
             if (peak > envelope) {
                 envelope = peak;
             } else {
-                // Blend fast/slow release based on how much limiting is happening
-                float grAmount = (envelope > ceilingLin && ceilingLin > 1e-10f)
-                    ? (envelope - ceilingLin) / ceilingLin
-                    : 0.0f;
-                float relBlend = juce::jlimit(0.0f, 1.0f, grAmount * 4.0f);
+                float grAmount = (envelope > ceilingLin && ceilingLin > 1.0e-10f)
+                               ? (envelope - ceilingLin) / ceilingLin : 0.0f;
+                float relBlend = juce::jlimit (0.0f, 1.0f, grAmount * 4.0f);
                 float rc = relFastCoeff * (1.0f - relBlend) + relSlowCoeff * relBlend;
                 envelope = rc * envelope + (1.0f - rc) * peak;
             }
 
-            // Compute required gain reduction in dB
             float targetGainDB = 0.0f;
-            if (envelope > ceilingLin && envelope > 1e-10f)
-                targetGainDB = 20.0f * std::log10(ceilingLin / envelope);
+            if (envelope > ceilingLin && envelope > 1.0e-10f)
+                targetGainDB = 20.0f * std::log10 (ceilingLin / envelope);
 
-            // Store in gain buffer for lookahead
-            gainBuffer[(size_t)writePos] = targetGainDB;
+            // Lowest gain required anywhere in the window, so reduction is
+            // already in progress when the peak reaches the output.
+            float windowMinDB = gainMin.pushAndGet (targetGainDB);
 
-            // ===== COSINE-INTERPOLATED LOOKAHEAD =====
-            float minGainDB = targetGainDB;
-            int minPos = 0;
-            for (int j = 0; j < LIMITER_LOOKAHEAD; ++j) {
-                int scanPos = (writePos - j + bufSize) % bufSize;
-                if (gainBuffer[(size_t)scanPos] < minGainDB) {
-                    minGainDB = gainBuffer[(size_t)scanPos];
-                    minPos = j;
-                }
-            }
-
-            int readPos = (writePos - LIMITER_LOOKAHEAD + bufSize) % bufSize;
-            float readGainDB = gainBuffer[(size_t)readPos];
-
-            // Cosine interpolation: smooth ramp toward minimum upcoming gain
-            float t = (minPos > 0) ? (float)(LIMITER_LOOKAHEAD - minPos) / (float)LIMITER_LOOKAHEAD : 1.0f;
-            float cosT = 0.5f * (1.0f - std::cos(t * juce::MathConstants<float>::pi));
-            float appliedGainDB = readGainDB * (1.0f - cosT) + minGainDB * cosT;
-
-            // Two-stage smoothing
-            smoothedGainDB = smoothCoeff1 * smoothedGainDB + (1.0f - smoothCoeff1) * appliedGainDB;
+            smoothedGainDB  = smoothCoeff1 * smoothedGainDB  + (1.0f - smoothCoeff1) * windowMinDB;
             smoothedGainDB2 = smoothCoeff2 * smoothedGainDB2 + (1.0f - smoothCoeff2) * smoothedGainDB;
-            appliedGainDB = smoothedGainDB2;
 
-            // Convert to linear with per-sample interpolation
             static constexpr float dB2LinFactor = 0.11512925464970229f; // ln(10)/20
-            float targetGainLin = std::exp(appliedGainDB * dB2LinFactor);
-            if (targetGainLin > 1.0f) targetGainLin = 1.0f;  // limiter never boosts
-            float appliedGain = prevAppliedGain + (targetGainLin - prevAppliedGain) * 0.5f;
+            float targetGainLin = std::exp (smoothedGainDB2 * dB2LinFactor);
+            if (targetGainLin > 1.0f) targetGainLin = 1.0f;  // never boosts
+            // Two-tap average on the control signal: one zero at Nyquist, which
+            // keeps the gain multiply from generating its own aliasing.
+            float appliedGain = 0.5f * (prevAppliedGain + targetGainLin);
             prevAppliedGain = targetGainLin;
 
-            // Read delayed signal and apply gain
-            float dL = delayL[(size_t)readPos];
-            float dR = delayR[(size_t)readPos];
+            int readPos = (writePos - lookahead + bufSize) % bufSize;
+            float dL = delayL[(size_t) readPos];
+            float dR = delayR[(size_t) readPos];
             writePos = (writePos + 1) % bufSize;
 
             bufferL[i] = dL * appliedGain;
             bufferR[i] = dR * appliedGain;
 
-            // GR metering (smooth)
             float grDB = (appliedGain > 1.0e-10f && appliedGain < 0.999f)
-                       ? -20.0f * std::log10(appliedGain) : 0.0f;
+                       ? -20.0f * std::log10 (appliedGain) : 0.0f;
             currentGR = currentGR * grMeterCoeff + grDB * (1.0f - grMeterCoeff);
         }
 
         // envelope and both smoothing stages are pure IIR state. A single Inf
         // sample would drive smoothedGainDB to -Inf and leave the limiter
         // outputting permanent silence, so recover rather than latch.
-        if (! (std::isfinite(envelope) && std::isfinite(smoothedGainDB)
-            && std::isfinite(smoothedGainDB2) && std::isfinite(prevAppliedGain)
-            && std::isfinite(currentGR)))
+        if (! (std::isfinite (envelope) && std::isfinite (smoothedGainDB)
+            && std::isfinite (smoothedGainDB2) && std::isfinite (prevAppliedGain)
+            && std::isfinite (currentGR)))
             reset();
     }
 
     float getGainReductionDB() const { return currentGR; }
-    int getLatencySamples() const { return LIMITER_LOOKAHEAD; }
+    int   getLatencySamples()  const { return lookahead; }
 
 private:
     double sr = 44100.0;
+    int lookahead = 88;
     float relFastCoeff = 0.0f, relSlowCoeff = 0.0f;
     float smoothCoeff1 = 0.0f, smoothCoeff2 = 0.0f;
     float grMeterCoeff = 0.0f;
@@ -166,6 +144,7 @@ private:
     float smoothedGainDB = 0.0f, smoothedGainDB2 = 0.0f;
     float currentGR = 0.0f;
 
-    std::vector<float> delayL, delayR, gainBuffer;
+    SlidingMinimum gainMin;
+    std::vector<float> delayL, delayR;
     int writePos = 0;
 };

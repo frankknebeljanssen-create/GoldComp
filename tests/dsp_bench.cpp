@@ -6,6 +6,7 @@
 
 #include "../Source/DSP/RVoxCompressor.h"
 #include "../Source/DSP/LookaheadLimiter.h"
+#include "../Source/DSP/SlidingExtremum.h"
 
 #include <cmath>
 #include <cstdio>
@@ -163,11 +164,70 @@ void benchCompressorTiming()
                      (osN - loudLen) / (SR * 2.0) * 1000.0);
 }
 
+//==============================================================================
+// The sliding minimum replaces the per-sample window scan in both lookahead
+// stages, so it has to agree with brute force on every sample or it will
+// introduce gain errors that are very hard to hear out.
+bool testSlidingMinimum()
+{
+    const int windows[] = { 1, 2, 7, 32, 88, 129 };
+    int failures = 0, checked = 0;
+
+    for (int w : windows)
+    {
+        SlidingMinimum sm;
+        sm.prepare (w);
+        sm.reset (0.0f);
+
+        std::vector<float> history;
+        // deterministic pseudo-random walk with plateaus and spikes, since
+        // equal neighbouring values are what break naive deque code
+        unsigned state = 12345u;
+        auto next = [&] {
+            state = state * 1103515245u + 12345u;
+            int r = (int) ((state >> 16) & 0x7fff);
+            if (r % 11 == 0) return -40.0f;              // spike
+            if (r % 5 == 0)  return 0.0f;                // plateau
+            return -(float) (r % 25);
+        };
+
+        for (int n = 0; n < 4000; ++n)
+        {
+            float v = next();
+            float got = sm.pushAndGet (v);
+            history.push_back (v);
+
+            // brute force over the same window, padded with the reset fill
+            float want = v;
+            for (int k = 0; k < w; ++k)
+            {
+                int idx = (int) history.size() - 1 - k;
+                float hv = idx >= 0 ? history[(size_t) idx] : 0.0f;
+                want = std::min (want, hv);
+            }
+            ++checked;
+            if (std::abs (got - want) > 1.0e-6f)
+            {
+                if (failures < 3)
+                    std::printf ("  MISMATCH w=%d n=%d got %.2f want %.2f\n", w, n, got, want);
+                ++failures;
+            }
+        }
+    }
+
+    std::printf ("SLIDING MINIMUM  %d samples checked across %zu window sizes: %s\n\n",
+                 checked, sizeof (windows) / sizeof (windows[0]),
+                 failures == 0 ? "all match brute force" : "FAILURES");
+    return failures == 0;
+}
+
 } // namespace
 
 int main()
 {
     std::printf ("\n=== GoldComp DSP bench @ %.0f Hz ===\n\n", SR);
+    if (! testSlidingMinimum())
+        return 1;
     benchLimiter();
     benchCompressorTransient();
     benchCompressorTiming();

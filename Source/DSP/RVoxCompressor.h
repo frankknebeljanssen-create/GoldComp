@@ -2,6 +2,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_dsp/juce_dsp.h>
+#include "SlidingExtremum.h"
 #include <cmath>
 #include <vector>
 #include <array>
@@ -78,6 +79,7 @@ public:
         delayBufferL.assign(LOOKAHEAD_SAMPLES + 1, 0.0f);
         delayBufferR.assign(LOOKAHEAD_SAMPLES + 1, 0.0f);
         gainDBBuffer.assign(LOOKAHEAD_SAMPLES + 1, 0.0f);
+        gainMin.prepare(LOOKAHEAD_SAMPLES);
 
         grHistorySamplesPerSlot = std::max(1, (int)(sr / 86.0));
 
@@ -92,6 +94,7 @@ public:
         std::fill(delayBufferL.begin(), delayBufferL.end(), 0.0f);
         std::fill(delayBufferR.begin(), delayBufferR.end(), 0.0f);
         std::fill(gainDBBuffer.begin(), gainDBBuffer.end(), 0.0f);
+        gainMin.reset(0.0f);
         delayWritePos = 0;
         envDB = -100.0f;
         rmsSquaredSum = 0.0f;
@@ -171,6 +174,9 @@ public:
                 delayBufferL[delayWritePos] = bufferL[i];
                 delayBufferR[delayWritePos] = bufferR[i];
                 gainDBBuffer[delayWritePos] = 0.0f;
+                // Keep the window fed while the knob sits at zero, otherwise
+                // turning it up would look back at stale gain values.
+                gainMin.pushAndGet(0.0f);
                 int readPos = (delayWritePos - LOOKAHEAD_SAMPLES + (int)delayBufferL.size()) % (int)delayBufferL.size();
                 float delayedL = delayBufferL[readPos];
                 float delayedR = delayBufferR[readPos];
@@ -353,31 +359,23 @@ public:
 
             if (smoothAttack)
             {
-                // ===== COSINE-INTERPOLATED LOOKAHEAD =====
-                // Scan the lookahead window for the minimum upcoming gain.
-                // Then cosine-interpolate from the read position gain toward
-                // that minimum. This creates an ultra-smooth, artifact-free
-                // attack ramp — the hallmark of top-tier compressors.
-                float minGainDB = totalGainDB;
-                int minPos = 0;
-                for (int j = 0; j < LOOKAHEAD_SAMPLES; ++j) {
-                    int scanPos = (delayWritePos - j + (int)gainDBBuffer.size()) % (int)gainDBBuffer.size();
-                    if (gainDBBuffer[scanPos] < minGainDB) {
-                        minGainDB = gainDBBuffer[scanPos];
-                        minPos = j;
-                    }
-                }
-                float readGainDB = gainDBBuffer[readPos];
-
-                // Cosine fade: smoothly transition from readGain toward minimum
-                // t = how far through the window we are (0 = just written, 1 = read pos)
-                float t = (minPos > 0) ? (float)(LOOKAHEAD_SAMPLES - minPos) / (float)LOOKAHEAD_SAMPLES : 1.0f;
-                // Cosine curve: 0→1 smoothly (starts slow, accelerates, ends slow)
-                float cosT = 0.5f * (1.0f - std::cos(t * juce::MathConstants<float>::pi));
-                appliedGainDB = readGainDB * (1.0f - cosT) + minGainDB * cosT;
+                // ===== LOOKAHEAD =====
+                // Target the lowest gain required anywhere in the window, so
+                // reduction is already underway when the peak reaches the
+                // output. The two one-pole stages below turn that step into the
+                // actual ramp.
+                //
+                // This used to cosine-interpolate between the window minimum
+                // and the gain at the read position, weighted by how far away
+                // the minimum was — but the weighting ran backwards: the closer
+                // the peak, the *less* reduction was applied. On an isolated
+                // transient the target dropped to full depth immediately, drifted
+                // back toward unity over the window, then snapped down again as
+                // the peak landed, which is a gain ripple rather than a ramp.
+                float windowMinDB = gainMin.pushAndGet(totalGainDB);
 
                 // Stage 1: primary envelope smoothing
-                smoothedGainDB = smoothCoeff1 * smoothedGainDB + (1.0f - smoothCoeff1) * appliedGainDB;
+                smoothedGainDB = smoothCoeff1 * smoothedGainDB + (1.0f - smoothCoeff1) * windowMinDB;
                 // Stage 2: micro-jitter removal
                 smoothedGainDB2 = smoothCoeff2 * smoothedGainDB2 + (1.0f - smoothCoeff2) * smoothedGainDB;
                 appliedGainDB = smoothedGainDB2;
@@ -531,6 +529,7 @@ private:
     double sr = 44100.0, invSr = 1.0 / 44100.0;
     std::vector<float> delayBufferL, delayBufferR;
     std::vector<float> gainDBBuffer; // gain stored in dB, not linear
+    SlidingMinimum gainMin;          // lowest gain across the lookahead window
     int delayWritePos = 0;
 
     float releaseCoeffFast = 0.0f, releaseCoeffSlow = 0.0f;
