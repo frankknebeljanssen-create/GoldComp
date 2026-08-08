@@ -10,7 +10,10 @@
 class RVoxCompressor
 {
 public:
-    static constexpr int   LOOKAHEAD_SAMPLES = 64;
+    // Lookahead in seconds rather than samples, so the attack character does not
+    // change with the session sample rate. It used to be a fixed 64 samples,
+    // which meant 0.73 ms at 44.1 kHz but only 0.17 ms at 192 kHz.
+    static constexpr float LOOKAHEAD_SECONDS = 0.0015f;
     static constexpr float MAX_RATIO         = 15.0f;
     static constexpr int   GR_HISTORY_SIZE   = 2048;
     static constexpr float KNEE_WIDTH_MIN    = 6.0f;
@@ -25,6 +28,7 @@ public:
     {
         sr = sampleRate;
         invSr = 1.0 / sampleRate;
+        lookahead = std::max(8, (int)std::lround(sr * (double)LOOKAHEAD_SECONDS));
 
         releaseCoeffFast = std::exp(-1.0f / (float(sr) * 0.060f));
         releaseCoeffSlow = std::exp(-1.0f / (float(sr) * 0.700f));
@@ -66,13 +70,12 @@ public:
         // Gain smoothing in dB domain: ~3ms time constant
         gainSmoothCoeff = std::exp(-1.0f / (float(sr) * 0.003f));
 
-        // Lookahead gain smoothing — SR-dependent (designed at 44.1kHz)
-        // Stage 1: ~0.27ms primary envelope
-        smoothCoeff1 = std::exp(-1.0f / (float(sr) * 0.00027f));
-        // Stage 2: ~0.74ms micro-jitter removal
-        smoothCoeff2 = std::exp(-1.0f / (float(sr) * 0.00074f));
-        // Punchy mode (no lookahead): ~0.44ms
-        punchySmoothCoeff = std::exp(-1.0f / (float(sr) * 0.00044f));
+        // Lookahead gain smoothing. Retuned to settle inside the 1.5 ms window:
+        // the old 0.27/0.74 ms pair only fitted because the coefficients were
+        // being computed for half the rate the loop actually ran at.
+        smoothCoeff1 = std::exp(-1.0f / (float(sr) * 0.00020f));
+        smoothCoeff2 = std::exp(-1.0f / (float(sr) * 0.00045f));
+        punchySmoothCoeff = std::exp(-1.0f / (float(sr) * 0.00035f));
         // GR metering: ~8ms smoothing for display
         grMeterCoeff = std::exp(-1.0f / (float(sr) * 0.008f));
 
@@ -82,10 +85,10 @@ public:
         autoLevelRiseCoeff = std::exp(-1.0f / (float(sr) * 0.800f));
         autoLevelFallCoeff = std::exp(-1.0f / (float(sr) * 3.000f));
 
-        delayBufferL.assign(LOOKAHEAD_SAMPLES + 1, 0.0f);
-        delayBufferR.assign(LOOKAHEAD_SAMPLES + 1, 0.0f);
-        gainDBBuffer.assign(LOOKAHEAD_SAMPLES + 1, 0.0f);
-        gainMin.prepare(LOOKAHEAD_SAMPLES);
+        delayBufferL.assign(lookahead + 1, 0.0f);
+        delayBufferR.assign(lookahead + 1, 0.0f);
+        gainDBBuffer.assign(lookahead + 1, 0.0f);
+        gainMin.prepare(lookahead);
 
         grHistorySamplesPerSlot = std::max(1, (int)(sr / 86.0));
 
@@ -185,7 +188,7 @@ public:
                 // Keep the window fed while the knob sits at zero, otherwise
                 // turning it up would look back at stale gain values.
                 gainMin.pushAndGet(0.0f);
-                int readPos = (delayWritePos - LOOKAHEAD_SAMPLES + (int)delayBufferL.size()) % (int)delayBufferL.size();
+                int readPos = (delayWritePos - lookahead + (int)delayBufferL.size()) % (int)delayBufferL.size();
                 float delayedL = delayBufferL[readPos];
                 float delayedR = delayBufferR[readPos];
 
@@ -220,13 +223,16 @@ public:
         // source the threshold was still above the signal at knob 12, so the
         // first third of the range produced no gain reduction at all.
         //
-        // depth goes from 6 dB *above* the average (no compression) to 24 dB
-        // below it (heavy), so knob position means the same thing regardless of
-        // how hot the incoming track is.
+        // depth goes from 6 dB *above* the average (no compression) to 12 dB
+        // below it, so knob position means the same thing regardless of how hot
+        // the incoming track is. Calibrated against measurement: at the top of
+        // the range this lands around 17 dB of reduction, which is already a lot
+        // for a vocal. A steeper curve was tried first and produced 27 dB, which
+        // drove makeup into its ceiling and left nothing but squash.
         //
         // autoLevelDB is measured from the detector, i.e. pre-compression, so it
         // cannot feed back from the gain being applied.
-        float depthDB = -6.0f + compAmount * 30.0f;
+        float depthDB = -6.0f + compAmount * 18.0f;
         float thresholdDB = autoLevelDB - depthDB;
 
         float ratio = 1.0f + compAmount * compAmount * (MAX_RATIO - 1.0f);
@@ -245,27 +251,31 @@ public:
             float detR = (scR != nullptr) ? scR[i] : inR;
 
             // ===== DETECTOR =====
-            // True stereo summing
-            float detMono = std::sqrt(detL * detL + detR * detR) * 0.7071f;
+            // Sidechain filtering happens on the WAVEFORM, before rectification.
+            // It used to run after sqrt(L^2+R^2), i.e. on an already-rectified
+            // signal — filtering an envelope rather than audio, so neither the
+            // SC HPF knob nor the 200 Hz shelf did what its label said. A 50 Hz
+            // tone rectifies to a ~100 Hz ripple riding on DC, so high-passing
+            // afterwards removed the DC but left the ripple, and the knob's
+            // frequency had no straightforward meaning at all.
+            float mono = (detL + detR) * 0.5f;
 
-            // Sidechain HPF: removes bass from detector only (audio untouched)
-            // Prevents bass pumping the compressor
+            // Sidechain HPF: keeps bass out of the detector (audio untouched)
             if (scHpfFreq > 1.0f) {
                 // 2nd order Butterworth HPF via biquad
-                float scHpfOut = scHpfB0 * detMono + scHpfB1 * scHpfX1 + scHpfB2 * scHpfX2
+                float scHpfOut = scHpfB0 * mono + scHpfB1 * scHpfX1 + scHpfB2 * scHpfX2
                                - scHpfA1 * scHpfY1 - scHpfA2 * scHpfY2;
-                scHpfX2 = scHpfX1; scHpfX1 = detMono;
+                scHpfX2 = scHpfX1; scHpfX1 = mono;
                 scHpfY2 = scHpfY1; scHpfY1 = scHpfOut;
-                detMono = scHpfOut;
+                mono = scHpfOut;
             }
 
-            // Low shelf: cut below 200Hz (fixed, removes rumble from detector)
-            detLowLP = detLowLP + detLowCoeff * (detMono - detLowLP);
-            float lowContent = detLowLP;
-            detMono = detMono - detLowCutGain * lowContent;
+            // Fixed low shelf: -3 dB below 200 Hz, keeps rumble out of the detector
+            detLowLP = detLowLP + detLowCoeff * (mono - detLowLP);
+            mono = mono - detLowCutGain * detLowLP;
 
             // ===== HYBRID RMS/PEAK DETECTOR =====
-            float monoAbs = std::abs(detMono);
+            float monoAbs = std::abs(mono);
 
             if (monoAbs > peakEnv)
                 peakEnv = peakAttackCoeff * peakEnv + (1.0f - peakAttackCoeff) * monoAbs;
@@ -379,7 +389,7 @@ public:
             delayBufferR[delayWritePos] = inR;
             gainDBBuffer[delayWritePos] = totalGainDB;
 
-            int readPos = (delayWritePos - LOOKAHEAD_SAMPLES + (int)delayBufferL.size()) % (int)delayBufferL.size();
+            int readPos = (delayWritePos - lookahead + (int)delayBufferL.size()) % (int)delayBufferL.size();
             float delayedL = delayBufferL[readPos];
             float delayedR = delayBufferR[readPos];
 
@@ -478,7 +488,7 @@ public:
     }
 
     float getGainReductionDB() const { return smoothGR; }
-    int getLatencySamples() const { return LOOKAHEAD_SAMPLES; }
+    int getLatencySamples() const { return lookahead; }
     const std::array<float, GR_HISTORY_SIZE>& getGRHistory() const { return grHistory; }
     int getGRHistoryWritePos() const { return grHistoryWritePos; }
 
@@ -555,6 +565,7 @@ private:
     }
 
     double sr = 44100.0, invSr = 1.0 / 44100.0;
+    int lookahead = 64;
     std::vector<float> delayBufferL, delayBufferR;
     std::vector<float> gainDBBuffer; // gain stored in dB, not linear
     SlidingMinimum gainMin;          // lowest gain across the lookahead window

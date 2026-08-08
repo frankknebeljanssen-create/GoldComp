@@ -72,7 +72,7 @@ void benchCompressorTransient()
     const int  osN     = 16000;          // samples at the 2x rate
     const int  burstAt = 8000;
     const int  burstLen = 400;
-    const float compDB = -29.0f;         // knob fully up (internal range)
+    const float compDB = -36.0f;         // knob fully up
 
     std::vector<float> L ((size_t) osN), R ((size_t) osN);
     for (int n = 0; n < osN; ++n) {
@@ -81,18 +81,18 @@ void benchCompressorTransient()
     }
 
     RVoxCompressor comp;
-    comp.prepare (SR, 512);              // note: base rate, as in PluginProcessor
+    comp.prepare (SR * 2.0, 1024);       // 2x rate, as PluginProcessor does
     comp.userKneeWidth = 6.0f;
     comp.maxGainReductionDB = 36.0f;
     comp.setAttackTime (0.0001f);
     for (int off = 0; off < osN; off += 1024) {
         int nn = std::min (1024, osN - off);
-        comp.process (L.data() + off, R.data() + off, nn, compDB, -80.0f, 0);
+        comp.process (L.data() + off, R.data() + off, nn, compDB, -80.0f);
     }
 
-    // The compressor delays by LOOKAHEAD_SAMPLES, so the burst leaves the
-    // output that much later.
-    const int outStart = burstAt + RVoxCompressor::LOOKAHEAD_SAMPLES;
+    // The compressor delays by its lookahead, so the burst leaves the output
+    // that much later.
+    const int outStart = burstAt + comp.getLatencySamples();
     auto peakIn = [&] (int a, int b) {
         double p = 0.0;
         for (int n = a; n < b && n < osN; ++n) p = std::max (p, std::abs ((double) L[(size_t) n]));
@@ -130,7 +130,7 @@ void benchCompressorTiming()
     }
 
     RVoxCompressor comp;
-    comp.prepare (SR, 512);
+    comp.prepare (SR * 2.0, 1024);
     comp.userKneeWidth = 6.0f;
     comp.setAttackTime (0.0001f);
 
@@ -141,7 +141,7 @@ void benchCompressorTiming()
     std::vector<std::pair<int, double>> trace;
     for (int off = 0; off < osN; off += step) {
         int nn = std::min (step, osN - off);
-        comp.process (L.data() + off, R.data() + off, nn, -29.0f, -80.0f, 0);
+        comp.process (L.data() + off, R.data() + off, nn, -36.0f, -80.0f);
         trace.emplace_back (off + nn, (double) comp.getGainReductionDB());
     }
 
@@ -193,13 +193,13 @@ void benchGainStaging()
             const double srcDB = srcLevels[law];
             RVoxCompressor comp;
             LookaheadLimiter lim;
-            comp.prepare (SR, blockSize);
+            comp.prepare (SR * 2.0, blockSize * 2);
             comp.userKneeWidth = 6.0f;
             comp.maxGainReductionDB = 36.0f;
             comp.setAttackTime (0.0001f);
             lim.prepare (SR, blockSize);
 
-            const float compDB = -(float) knob * (29.0f / 36.0f);   // as PluginProcessor maps it
+            const float compDB = -(float) knob;   // knob maps directly now
             double makeupGRAvg = 0.0, makeupSum = 0.0, limGRSum = 0.0, compGRSum = 0.0;
             int counted = 0;
 
@@ -217,7 +217,7 @@ void benchGainStaging()
                     osL[(size_t) i] = osR[(size_t) i] = (float) (lin (srcDB) * env * s);
                 }
 
-                comp.process (osL.data(), osR.data(), blockSize * 2, compDB, -80.0f, 0);
+                comp.process (osL.data(), osR.data(), blockSize * 2, compDB, -80.0f);
 
                 // naive decimate — good enough for level bookkeeping
                 for (int i = 0; i < blockSize; ++i) {

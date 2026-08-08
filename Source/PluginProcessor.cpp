@@ -77,10 +77,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout GoldCompProcessor::createPar
 void GoldCompProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     currentSampleRate = sampleRate;
-    compressor.prepare(sampleRate, samplesPerBlock);
-    limiter.prepare(sampleRate, samplesPerBlock);
+    // The compressor is fed the 2x oversampled block, so it must be prepared at
+    // that rate. It was being given the host rate, which halved every time
+    // constant (50 ms RMS window ran as 25 ms, releases at half their labels) and
+    // put every detector filter an octave high — the SC HP Filter knob read
+    // 100 Hz and delivered 200 Hz. Latency accounting already accounted for the
+    // 2x domain; only the coefficients were missed.
+    compressor.prepare(sampleRate * compOSFactor, samplesPerBlock * compOSFactor);
+    limiter.prepare(sampleRate, samplesPerBlock);   // limiter runs at base rate
 
     juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32)samplesPerBlock, 2 };
+    // Allocate the coefficients object once, here, where allocation is allowed.
+    // processBlock then only ever writes into it in place.
+    sigHpFilter.state = juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, 100.0f);
     sigHpFilter.prepare(spec); sigHpFilter.reset();
 
     // Integer latency: without this getLatencyInSamples() returns a fractional
@@ -99,7 +108,7 @@ void GoldCompProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     // path by 4.43 samples while the plugin kept reporting the old figure —
     // measured as a full null at 4.8 kHz once Mix was pulled back. It runs
     // unconditionally now, so its latency is constant and counted.
-    totalWetLatency = compressor.getLatencySamples() / 2
+    totalWetLatency = compressor.getLatencySamples() / compOSFactor
                     + (int)compOS.getLatencyInSamples()
                     + (int)oversampler.getLatencyInSamples()
                     + limiter.getLatencySamples();
@@ -168,6 +177,26 @@ bool GoldCompProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
 {
     return layouts.getMainOutputChannelSet() == juce::AudioChannelSet::stereo()
         && layouts.getMainInputChannelSet() == juce::AudioChannelSet::stereo();
+}
+
+// Writes RBJ high-pass coefficients into an existing Coefficients object.
+// Allocation-free, so it is safe to call from processBlock.
+void GoldCompProcessor::setHighPassCoefficients(juce::dsp::IIR::Coefficients<float>& c,
+                                                double sampleRate, float freq)
+{
+    const double w0 = 2.0 * juce::MathConstants<double>::pi
+                    * juce::jlimit(1.0, sampleRate * 0.49, (double)freq) / sampleRate;
+    const double cosW0 = std::cos(w0);
+    const double alpha = std::sin(w0) / (2.0 * 0.70710678118654752);  // Q = 1/sqrt(2)
+    const double a0 = 1.0 + alpha;
+
+    // JUCE stores coefficients as { b0, b1, b2, a1, a2 }, already normalised by a0
+    auto& raw = c.coefficients;
+    raw.getReference(0) = (float)(((1.0 + cosW0) * 0.5) / a0);
+    raw.getReference(1) = (float)((-(1.0 + cosW0)) / a0);
+    raw.getReference(2) = raw.getReference(0);
+    raw.getReference(3) = (float)((-2.0 * cosW0) / a0);
+    raw.getReference(4) = (float)((1.0 - alpha) / a0);
 }
 
 // Asymmetric tube-style saturator, normalised so that small signals pass at
@@ -483,7 +512,11 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
         // 1. Signal HPF (coefficients cached — only recalc on change)
         if (hpfFreq > 1.0f) {
             if (std::abs(hpfFreq - lastHpfFreq) > 0.01f) {
-                *sigHpFilter.state = *juce::dsp::IIR::Coefficients<float>::makeHighPass(currentSampleRate, hpfFreq);
+                // Written in place rather than via IIR::Coefficients::makeHighPass,
+                // which returns a ReferenceCountedObjectPtr: that allocated and
+                // freed on the audio thread on every block of an HPF automation
+                // ramp, and malloc can block. Same RBJ high-pass design, Q=1/sqrt(2).
+                setHighPassCoefficients(*sigHpFilter.state, currentSampleRate, hpfFreq);
                 lastHpfFreq = hpfFreq;
             }
             juce::dsp::AudioBlock<float> block(buffer);

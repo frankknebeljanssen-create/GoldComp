@@ -82,11 +82,15 @@ private:
     double currentSampleRate = 44100.0;
     float lastHpfFreq = -1.0f;
 
+    // JUCE's second ctor argument is an exponent: 2^n times oversampling.
     juce::dsp::Oversampling<float> oversampler { 2, 2, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true };  // 4x for clipper
-    juce::dsp::Oversampling<float> compOS { 2, 1, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true };     // fixed 2x for compressor
+    juce::dsp::Oversampling<float> compOS { 2, 1, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true };     // 2x for compressor
+    static constexpr int compOSFactor = 2;   // must match compOS above
 
     static float softClipNormalized(float sample, float amount,
                                     float drive, float slopeNorm);
+    static void setHighPassCoefficients(juce::dsp::IIR::Coefficients<float>& c,
+                                        double sampleRate, float freq);
 
     // DC blocker after asymmetric clipper
     float dcBlockL = 0.0f, dcBlockR = 0.0f;
