@@ -85,9 +85,8 @@ private:
     juce::dsp::Oversampling<float> oversampler { 2, 2, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true };  // 4x for clipper
     juce::dsp::Oversampling<float> compOS { 2, 1, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true };     // fixed 2x for compressor
 
-    float softClip(float sample, float amount);
-    static float softClipWithMode(float sample, float amount, int mode);
-    int currentClipMode = 0;
+    static float softClipNormalized(float sample, float amount,
+                                    float drive, float slopeNorm);
 
     // DC blocker after asymmetric clipper
     float dcBlockL = 0.0f, dcBlockR = 0.0f;

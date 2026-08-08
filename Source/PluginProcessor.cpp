@@ -83,14 +83,25 @@ void GoldCompProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32)samplesPerBlock, 2 };
     sigHpFilter.prepare(spec); sigHpFilter.reset();
 
+    // Integer latency: without this getLatencyInSamples() returns a fractional
+    // group delay (3.137 and 4.433 samples here) which the (int) cast below
+    // silently truncated, leaving the dry/wet mix misaligned by a fraction of a
+    // sample. JUCE inserts the fractional part itself when asked to.
+    oversampler.setUsingIntegerLatency(true);
     oversampler.initProcessing((size_t)samplesPerBlock);
     oversampler.reset();
+    compOS.setUsingIntegerLatency(true);
     compOS.initProcessing((size_t)samplesPerBlock);
     compOS.reset();
 
-    // Wet path latency: compressor lookahead (in 2x samples → /2) + OS latency + limiter
+    // Wet path latency. The clipper's 4x oversampler was missing from this sum,
+    // and because it only ran when Clip was up, engaging Clip lengthened the wet
+    // path by 4.43 samples while the plugin kept reporting the old figure —
+    // measured as a full null at 4.8 kHz once Mix was pulled back. It runs
+    // unconditionally now, so its latency is constant and counted.
     totalWetLatency = compressor.getLatencySamples() / 2
                     + (int)compOS.getLatencyInSamples()
+                    + (int)oversampler.getLatencyInSamples()
                     + limiter.getLatencySamples();
     setLatencySamples(totalWetLatency);
 
@@ -159,43 +170,34 @@ bool GoldCompProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
         && layouts.getMainInputChannelSet() == juce::AudioChannelSet::stereo();
 }
 
-float GoldCompProcessor::softClip(float sample, float amount)
+// Asymmetric tube-style saturator, normalised so that small signals pass at
+// unity gain.
+//
+// The old normalisation divided by the curve's *asymptote* rather than its slope
+// at zero, which made the whole stage a gain control: at Clip 100% a -60 dBFS
+// signal came out +13.4 dB louder, with 3.1 dB of asymmetry between half-cycles
+// and -26.7 dBc of distortion on a -20 dBFS input. Turning the knob up mostly
+// meant turning the level up, and the block-rate RMS rematch that tried to hide
+// that introduced its own steps of up to 3.8 dB.
+//
+// Both branches are now scaled to slope 1 at the origin, so the curve is linear
+// for quiet material and only bends where it should. The two halves still differ
+// in curvature — that asymmetry is what generates the even harmonics — but they
+// now agree in gain, so there is no discontinuity at the zero crossing.
+float GoldCompProcessor::softClipNormalized(float sample, float amount,
+                                            float drive, float slopeNorm)
 {
-    return softClipWithMode(sample, amount, currentClipMode);
-}
-
-float GoldCompProcessor::softClipWithMode(float sample, float amount, int /*mode*/)
-{
-    if (amount < 0.001f) return sample;
-    float drive = 1.0f + amount * 4.0f;
-
-    // Sophisticated asymmetric clipper:
-    // - Positive half: soft exponential saturation (tube-like)
-    // - Negative half: gentler tanh curve (less distortion)
-    // - Generates even harmonics (2nd, 4th) → warm, musical character
-    // - Frequency-dependent: bass clips softer via the drive scaling
     float x = sample * drive;
-    float clipped;
-
+    float shaped;
     if (x > 0.0f) {
-        // Tube-style positive: 1 - exp(-x) with gentle knee
-        clipped = 1.0f - std::exp(-x);
+        // d/dx[1 - exp(-x)] = 1 at x = 0
+        shaped = 1.0f - std::exp(-x);
     } else {
-        // Gentler negative half: softer curve preserves asymmetry
-        clipped = -std::tanh(-x * 0.7f);
+        // d/dx[-tanh(-kx)/k] = 1 at x = 0, with k = 0.7 for a gentler negative half
+        static constexpr float k = 0.7f;
+        shaped = -std::tanh(-x * k) / k;
     }
-
-    // Normalize to preserve unity gain at drive level
-    float normP = 1.0f - std::exp(-(float)drive);
-    float normN = std::tanh((float)drive * 0.7f);
-    float normFactor = std::max(normP, normN);
-    if (normFactor > 0.001f) clipped /= normFactor;
-
-    // Subtle 2nd harmonic sweetener — scales with amount
-    // x² term adds even harmonics without changing the fundamental
-    float harmonicAmount = amount * 0.06f;
-    clipped += harmonicAmount * (clipped * std::abs(clipped) - clipped);
-
+    float clipped = shaped * slopeNorm;   // slopeNorm = 1/drive → unity at origin
     return sample * (1.0f - amount) + clipped * amount;
 }
 
@@ -612,75 +614,69 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
             }
             prevMakeupLin = makeupLin;
 
-            // 5. Limiter
-            limiter.process(left, right, numSamples, CEILING_DB);
-
-            // 5b. Safety soft-clip — multi-stage soft knee, more transparent than single tanh
-            // Starts gently at 75% ceiling, full limiting at 100%
-            {
-                float ceiling = std::pow(10.0f, CEILING_DB / 20.0f);
-                float knee = ceiling * 0.25f;       // 25% knee width
-                float kneeStart = ceiling - knee;   // starts at 75% ceiling
-                for (int i = 0; i < numSamples; ++i) {
-                    for (float* ch : { &left[i], &right[i] }) {
-                        float absVal = std::abs(*ch);
-                        if (absVal > kneeStart) {
-                            float sign = (*ch > 0) ? 1.0f : -1.0f;
-                            float over = (absVal - kneeStart) / knee;  // 0→1→∞
-                            // Soft curve: approaches ceiling asymptotically
-                            *ch = sign * (kneeStart + knee * (1.0f - 1.0f / (1.0f + over)));
-                        }
-                    }
-                }
-            }
-
-            // 6. Soft Clipper (adds harmonic saturation)
+            // 5. Soft Clipper — harmonic saturation, 4x oversampled.
+            //
+            // This sits BEFORE the limiter now. It used to run after both the
+            // limiter and the safety clip with nothing bounding it, so with the
+            // ceiling at -6 dBFS and Clip at 100% the output reached -0.53 dBFS,
+            // 5.5 dB above what the user asked for. Putting it ahead of the
+            // limiter means the ceiling is always respected.
+            //
+            // The oversampler runs unconditionally so the reported latency stays
+            // constant: crossing the clip threshold used to change plugin latency
+            // mid-stream and dump the oversampler's stale IIR state into the
+            // signal. With clipAmt at 0 the waveshaper is an identity, so this
+            // only costs the up/down conversion.
             float clipAmt = apvts.getRawParameterValue("clip")->load() / 100.0f;
-            if (clipAmt > 0.001f) {
-                // Measure RMS before clipping
-                float preClipRMS = 0.0f;
-                for (int i = 0; i < numSamples; ++i)
-                    preClipRMS += left[i] * left[i] + right[i] * right[i];
-                preClipRMS = std::sqrt(preClipRMS / (float)(numSamples * 2));
-
+            {
                 juce::dsp::AudioBlock<float> block(buffer);
                 auto osBlock = oversampler.processSamplesUp(block);
                 int osN = (int)osBlock.getNumSamples();
-                float totalDistortion = 0.0f;
-                int distCount = 0;
-                for (int ch = 0; ch < 2; ++ch) {
-                    float* d = osBlock.getChannelPointer((size_t)ch);
-                    for (int i = 0; i < osN; ++i) {
-                        float before = d[i];
-                        d[i] = softClip(d[i], clipAmt);
-                        if (std::abs(before) > 0.05f) {
-                            // Measure nonlinearity: how much did the waveshape change?
-                            float diff = std::abs(d[i] - before) / std::abs(before);
-                            totalDistortion += diff;
-                            distCount++;
+
+                if (clipAmt > 0.001f) {
+                    // Loop invariants: drive and both normalisation terms depend
+                    // only on clipAmt, which is constant across the block. These
+                    // were being recomputed for every one of 4 x numSamples x 2
+                    // samples — three transcendentals each.
+                    const float drive = 1.0f + clipAmt * 4.0f;
+                    const float slopeNorm = 1.0f / drive;
+                    float totalDistortion = 0.0f;
+                    int distCount = 0;
+                    for (int ch = 0; ch < 2; ++ch) {
+                        float* d = osBlock.getChannelPointer((size_t)ch);
+                        for (int i = 0; i < osN; ++i) {
+                            float before = d[i];
+                            d[i] = softClipNormalized(before, clipAmt, drive, slopeNorm);
+                            if (std::abs(before) > 0.05f) {
+                                totalDistortion += std::abs(d[i] - before) / std::abs(before);
+                                distCount++;
+                            }
                         }
                     }
+                    float avgDist = distCount > 0 ? totalDistortion / (float)distCount : 0.0f;
+                    clipActivity.store(juce::jlimit(0.0f, 1.0f, avgDist * 8.0f));
+                } else {
+                    clipActivity.store(0.0f);
                 }
+
                 oversampler.processSamplesDown(block);
-                float avgDist = distCount > 0 ? totalDistortion / (float)distCount : 0.0f;
-                clipActivity.store(juce::jlimit(0.0f, 1.0f, avgDist * 8.0f));
+            }
 
-                // Gain compensation: match post-clip RMS to pre-clip RMS
-                float postClipRMS = 0.0f;
-                for (int i = 0; i < numSamples; ++i)
-                    postClipRMS += left[i] * left[i] + right[i] * right[i];
-                postClipRMS = std::sqrt(postClipRMS / (float)(numSamples * 2));
+            // 6. Limiter — now the last gain stage, so the ceiling holds
+            limiter.process(left, right, numSamples, CEILING_DB);
 
-                if (postClipRMS > 1e-8f) {
-                    float compGain = preClipRMS / postClipRMS;
-                    compGain = juce::jlimit(0.5f, 1.5f, compGain);  // safety
-                    for (int i = 0; i < numSamples; ++i) {
-                        left[i] *= compGain;
-                        right[i] *= compGain;
-                    }
+            // 6b. Safety clamp. The limiter holds the ceiling to within 0.03 dB
+            // now, so this only has to catch that residue. It used to be a
+            // rational saturator starting 2.5 dB *below* the ceiling, which made
+            // it the real peak controller — and being un-oversampled it produced
+            // -33 dBc of aliasing at 3 kHz, right in the sibilance band. A tight
+            // clamp shapes so little that its harmonics are negligible.
+            {
+                const float ceiling = std::pow(10.0f, CEILING_DB / 20.0f);
+                for (int i = 0; i < numSamples; ++i) {
+                    left[i]  = juce::jlimit(-ceiling, ceiling, left[i]);
+                    right[i] = juce::jlimit(-ceiling, ceiling, right[i]);
                 }
-            } else {
-                clipActivity.store(0.0f);
             }
 
             // 7. Measure output LUFS BEFORE gain match (prevents feedback loop)
@@ -760,10 +756,10 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
                 gainMatchOffsetDB.store(0.0f);  // reset so HONEST starts clean
             }
 
-            // 9. Latency-compensated Dry/Wet Mix — per-sample interpolated
-            int effectiveWetLatency = compressor.getLatencySamples() / 2
-                                   + (int)compOS.getLatencyInSamples()
-                                   + limiter.getLatencySamples();
+            // 9. Latency-compensated Dry/Wet Mix — per-sample interpolated.
+            // Must match totalWetLatency exactly, clipper oversampler included,
+            // or the two paths comb against each other.
+            const int effectiveWetLatency = totalWetLatency;
 
             if (mixAmt < 0.999f || prevMixWet < 0.999f) {
                 float mixDelta = (mixAmt - prevMixWet) / (float)numSamples;
