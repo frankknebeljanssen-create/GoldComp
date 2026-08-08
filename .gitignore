@@ -1,0 +1,4 @@
+JUCE/
+build/
+.DS_Store
+*.zip
