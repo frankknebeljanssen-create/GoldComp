@@ -236,9 +236,11 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
         compOS.reset();
     }
 
-    float compDB   = -apvts.getRawParameterValue("comp")->load(); // param is 0-36, negate for processing
-    // Remap: knob 0-36 → internal 0-29 (sweet spot at 29 is max effective compression)
-    compDB = compDB * (29.0f / 36.0f);
+    // Knob 0-36, negated for processing. There used to be a 29/36 remap here
+    // while the compressor divided by 36 internally, so the knob only ever
+    // reached 80% of the designed range: max ratio came out at 10:1 instead of
+    // 15:1. With the auto threshold the remap has no purpose either way.
+    float compDB   = -apvts.getRawParameterValue("comp")->load();
     // Out Gain is a true output level now, not the limiter ceiling. Using it as
     // the ceiling meant turning it down made the signal quieter *and* flatter
     // (12.8 dB of limiting at 0, 24.8 dB at -12), so there was no way out of
@@ -322,26 +324,38 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
         // ssLow  = comp where GR on peaks ≈ 3dB  (entering sweet spot)
         // ssHigh = comp where GR on peaks ≈ 8dB  (leaving sweet spot)
 
-        float peakLevel = smoothedPeakDB;
+        // The threshold is referenced to the programme level now, so distance
+        // above it no longer depends on the absolute input level — only on the
+        // knob's depth setting plus how far the detector's own peaks rise above
+        // its average. That makes the estimate level-independent.
+        //
+        // This used to compare an absolute threshold against smoothedPeakDB,
+        // which was wrong twice over: it used a divisor the compressor did not
+        // use, and it fed a peak level into a curve the compressor drives from
+        // an RMS-dominant detector. It predicted 20.6 dB of reduction where the
+        // real value was 2.9 dB.
+        //
+        // The detector is RMS-dominant (peak blend 0.08-0.20), so it sees far
+        // less crest than the waveform does; the 0.4 factor is an approximation
+        // of that, not a derived constant.
+        float detectorCrest = juce::jlimit(2.0f, 8.0f, smoothedCrestDB * 0.4f);
 
-        // Estimate GR for a given comp knob value against our measured peak level
         auto estimateGR = [&](float comp) -> float {
             float compAmt = comp / 36.0f;
-            float thresh = -6.0f - (compAmt * 30.0f) - (compAmt * compAmt * 12.0f) - (compAmt * compAmt * compAmt * 6.0f);
-            float ratio = 1.0f + compAmt * compAmt * 14.0f;  // matches MAX_RATIO - 1
-            float kneeDB = 6.0f; // matches compressor knee
+            float depth = -6.0f + compAmt * 30.0f;          // matches the compressor
+            float ratio = 1.0f + compAmt * compAmt * 14.0f; // matches MAX_RATIO - 1
+            float aboveThresh = depth + detectorCrest;
+            float kneeDB = 6.0f;                            // matches compressor knee
             float halfKnee = kneeDB / 2.0f;
 
-            if (peakLevel < thresh - halfKnee)
-                return 0.0f; // below knee — no compression
-            else if (peakLevel > thresh + halfKnee)
-                return (peakLevel - thresh) * (1.0f - 1.0f / ratio); // above knee
+            if (aboveThresh < -halfKnee)
+                return 0.0f;
+            else if (aboveThresh > halfKnee)
+                return aboveThresh * (1.0f - 1.0f / ratio);
             else {
-                // In knee region — smoothstep approximation
-                float x = peakLevel - thresh + halfKnee;
-                float t = x / kneeDB;
+                float t = (aboveThresh + halfKnee) / kneeDB;
                 float tSat = t * t * (3.0f - 2.0f * t);
-                return tSat * (peakLevel - thresh) * (1.0f - 1.0f / ratio);
+                return tSat * aboveThresh * (1.0f - 1.0f / ratio);
             }
         };
 
@@ -397,7 +411,7 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
         float ssMid = (ssLow + ssHigh) * 0.5f;
 
         // User's knob position
-        float userComp = -compDB * (36.0f / 29.0f);
+        float userComp = -compDB;
 
         // Target offset
         float targetOffset = ssMid - userComp;
@@ -435,9 +449,9 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     }
 
     // Apply RIDE offset to compDB (scale to internal range)
-    float rideOff = rideSmoothedOffset * (29.0f / 36.0f);
+    float rideOff = rideSmoothedOffset;
     compDB -= rideOff;
-    compDB = juce::jlimit(-29.0f, 0.0f, compDB);
+    compDB = juce::jlimit(-36.0f, 0.0f, compDB);
 
     // dlySize needed for dry/wet mix
     int dlySize = (int)dryDelayL.size();
@@ -522,13 +536,12 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
         }
 
         // 3. Compressor — internally optimized timing (no user attack/release)
-        int boostMode = 0;
         compressor.smoothAttack = true;
         float gateThresh = apvts.getRawParameterValue("gate")->load();
 
         // Attack/Release driven by comp amount — like RVox, always optimal
         // Fast attack + RMS detector + lookahead = consonants preserved naturally
-        float compAmt01 = juce::jlimit(0.0f, 1.0f, -compDB / 29.0f);  // 0→1 (internal range)
+        float compAmt01 = juce::jlimit(0.0f, 1.0f, -compDB / 36.0f);
         float attackMs = 0.1f;  // near-instant, lookahead handles smoothing
         float relFastMs = 40.0f + (1.0f - compAmt01) * 40.0f;  // 40-80ms: tighter at high comp
         float relSlowMs = 400.0f + (1.0f - compAmt01) * 600.0f;  // 400-1000ms: shorter at high comp
@@ -553,7 +566,7 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
             int osN = (int)osBlock.getNumSamples();
             float* osL = osBlock.getChannelPointer(0);
             float* osR = osBlock.getChannelPointer(1);
-            compressor.process(osL, osR, osN, compDB, gateThresh, boostMode);
+            compressor.process(osL, osR, osN, compDB, gateThresh);
             compOS.processSamplesDown(block);
         }
 

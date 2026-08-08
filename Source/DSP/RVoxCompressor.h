@@ -76,6 +76,12 @@ public:
         // GR metering: ~8ms smoothing for display
         grMeterCoeff = std::exp(-1.0f / (float(sr) * 0.008f));
 
+        // Auto-threshold programme tracker. Asymmetric: adapts to a louder
+        // section reasonably quickly, lets go slowly so short pauses and
+        // sustained quiet passages do not move the threshold much.
+        autoLevelRiseCoeff = std::exp(-1.0f / (float(sr) * 0.800f));
+        autoLevelFallCoeff = std::exp(-1.0f / (float(sr) * 3.000f));
+
         delayBufferL.assign(LOOKAHEAD_SAMPLES + 1, 0.0f);
         delayBufferR.assign(LOOKAHEAD_SAMPLES + 1, 0.0f);
         gainDBBuffer.assign(LOOKAHEAD_SAMPLES + 1, 0.0f);
@@ -107,6 +113,8 @@ public:
         smoothedGainDB2 = 0.0f;
         prevAppliedGainLin = 1.0f;
         detLowLP = 0.0f;
+        autoLevelDB = -18.0f;
+        autoLevelPrimed = false;
         gateOpen = true;
         scHpfX1 = scHpfX2 = scHpfY1 = scHpfY2 = 0.0f;
         prevGrDB = 0.0f;
@@ -161,7 +169,7 @@ public:
     bool outputDelta = false;
 
     void process(float* bufferL, float* bufferR, int numSamples, float compDB,
-                 float gateThreshDB = -80.0f, int boostMode = 0,
+                 float gateThreshDB = -80.0f,
                  const float* scL = nullptr, const float* scR = nullptr)
     {
         float compAmount = -compDB / 36.0f;
@@ -205,16 +213,24 @@ public:
             return;
         }
 
-        float thresholdDB = -6.0f - (compAmount * 30.0f) - (compAmount * compAmount * 12.0f) - (compAmount * compAmount * compAmount * 6.0f);
+        // ===== AUTO THRESHOLD =====
+        // The threshold sits a knob-controlled distance below a slow average of
+        // the programme level, rather than at a fixed dBFS value. With a fixed
+        // threshold the knob only did anything on hot tracks: on a -20 dBFS
+        // source the threshold was still above the signal at knob 12, so the
+        // first third of the range produced no gain reduction at all.
+        //
+        // depth goes from 6 dB *above* the average (no compression) to 24 dB
+        // below it (heavy), so knob position means the same thing regardless of
+        // how hot the incoming track is.
+        //
+        // autoLevelDB is measured from the detector, i.e. pre-compression, so it
+        // cannot feed back from the gain being applied.
+        float depthDB = -6.0f + compAmount * 30.0f;
+        float thresholdDB = autoLevelDB - depthDB;
+
         float ratio = 1.0f + compAmount * compAmount * (MAX_RATIO - 1.0f);
         ratio = 1.0f + (ratio - 1.0f) * ratioMultiplier; // Scale ratio around 1:1
-        if (boostMode == 1) {
-            thresholdDB -= 6.0f;   // 6dB lower threshold
-            ratio *= 1.5f;         // 50% more ratio
-        } else if (boostMode == 2) {
-            thresholdDB -= 12.0f;  // 12dB lower — catches everything
-            ratio *= 2.5f;         // massive ratio
-        }
         float baseKneeDB = userKneeWidth;
         // RMS-dominant detection
         float peakBlend = 0.08f + compAmount * 0.12f;
@@ -265,6 +281,18 @@ public:
             // 20*log10(x) = 8.6858896*ln(x) — std::log is ~2x faster than log10
             static constexpr float ln2dB = 8.685889638065037f; // 20/ln(10)
             float detDB = (detLevel > 1e-10f) ? ln2dB * std::log(detLevel) : -100.0f;
+
+            // ===== SLOW PROGRAMME LEVEL (drives the auto threshold) =====
+            // Deliberately far slower than the compressor's own release, so the
+            // threshold adapts between sections without chasing the gain
+            // reduction and flattening the compression out. Only tracked while
+            // there is signal, otherwise a pause would drag it down and the
+            // vocal would get slammed on the way back in.
+            if (detDB > -60.0f) {
+                if (! autoLevelPrimed) { autoLevelDB = detDB; autoLevelPrimed = true; }
+                float c = (detDB > autoLevelDB) ? autoLevelRiseCoeff : autoLevelFallCoeff;
+                autoLevelDB = c * autoLevelDB + (1.0f - c) * detDB;
+            }
 
             // ===== PROGRAM-DEPENDENT ENVELOPE =====
             if (detDB > envDB)
@@ -543,6 +571,10 @@ private:
     float rmsSquaredSum = 0.0f;
     float peakEnv = 0.0f;
     float envDB = -100.0f;
+    // Slow programme level the auto threshold is referenced to
+    float autoLevelDB = -18.0f;
+    bool  autoLevelPrimed = false;
+    float autoLevelRiseCoeff = 0.0f, autoLevelFallCoeff = 0.0f;
     float expanderEnvDB = -100.0f;
     float expanderReleaseCoeff = 0.0f;
     float gateOpenCoeff = 0.0f, gateCloseCoeff = 0.0f;

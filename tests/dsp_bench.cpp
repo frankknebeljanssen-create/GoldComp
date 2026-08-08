@@ -176,17 +176,21 @@ void benchGainStaging()
     const int   blockSize = 512;
     const int   blocks    = 220;                 // ~2.5 s, long enough for the
     const float ceilingDB = -0.3f;               // 500 ms makeup average to settle
+    const double srcLevels[] = { -30.0, -15.0 };  // quiet and hot source
     const int   knobs[]   = { 4, 8, 12, 20, 28, 36 };
 
-    std::printf ("GAIN STAGING  vocal-like input at -18 dBFS RMS, ceiling %.1f dBFS\n", ceilingDB);
-    std::printf ("  %-5s  %-22s  %-22s\n", "knob", "makeup from knob (old)", "makeup from GR (new)");
-    std::printf ("  %-5s  %-10s %-11s  %-10s %-11s\n", "", "makeup", "limiter GR", "makeup", "limiter GR");
+    std::printf ("GAIN STAGING  ceiling %.1f dBFS. Knob position should mean the same\n", ceilingDB);
+    std::printf ("              amount of compression at both source levels.\n");
+    std::printf ("  %-5s  %-24s  %-24s\n", "knob", "source -30 dBFS", "source -15 dBFS");
+    std::printf ("  %-5s  %-8s %-7s %-7s  %-8s %-7s %-7s\n",
+                 "", "compGR", "makeup", "limGR", "compGR", "makeup", "limGR");
 
     for (int knob : knobs)
     {
-        double results[2][2];
+        double results[2][3];
         for (int law = 0; law < 2; ++law)
         {
+            const double srcDB = srcLevels[law];
             RVoxCompressor comp;
             LookaheadLimiter lim;
             comp.prepare (SR, blockSize);
@@ -196,7 +200,7 @@ void benchGainStaging()
             lim.prepare (SR, blockSize);
 
             const float compDB = -(float) knob * (29.0f / 36.0f);   // as PluginProcessor maps it
-            double makeupGRAvg = 0.0, makeupSum = 0.0, limGRSum = 0.0;
+            double makeupGRAvg = 0.0, makeupSum = 0.0, limGRSum = 0.0, compGRSum = 0.0;
             int counted = 0;
 
             std::vector<float> osL ((size_t) blockSize * 2), osR ((size_t) blockSize * 2);
@@ -210,7 +214,7 @@ void benchGainStaging()
                     double env = 0.35 + 0.65 * std::pow (std::abs (std::sin (2.0 * M_PI * 2.5 * t)), 2.0);
                     double s = std::sin (2.0 * M_PI * 220.0 * t) * 0.7
                              + std::sin (2.0 * M_PI * 1400.0 * t) * 0.3;
-                    osL[(size_t) i] = osR[(size_t) i] = (float) (lin (-15.0) * env * s);
+                    osL[(size_t) i] = osR[(size_t) i] = (float) (lin (srcDB) * env * s);
                 }
 
                 comp.process (osL.data(), osR.data(), blockSize * 2, compDB, -80.0f, 0);
@@ -221,17 +225,9 @@ void benchGainStaging()
                     bR[(size_t) i] = osR[(size_t) (i * 2)];
                 }
 
-                float makeupDB;
-                if (law == 0) {
-                    float rawMakeup = -compDB;
-                    makeupDB = rawMakeup <= 18.0f
-                             ? rawMakeup * 1.15f
-                             : 18.0f * 1.15f + std::pow ((rawMakeup - 18.0f) / 18.0f, 0.75f) * 18.0f;
-                } else {
-                    double sm = std::exp (-(double) blockSize / (SR * 0.500));
-                    makeupGRAvg = makeupGRAvg * sm + comp.getGainReductionDB() * (1.0 - sm);
-                    makeupDB = (float) std::max (0.0, std::min (24.0, makeupGRAvg));
-                }
+                double sm = std::exp (-(double) blockSize / (SR * 0.500));
+                makeupGRAvg = makeupGRAvg * sm + comp.getGainReductionDB() * (1.0 - sm);
+                float makeupDB = (float) std::max (0.0, std::min (24.0, makeupGRAvg));
                 float mk = std::pow (10.0f, makeupDB / 20.0f);
                 for (int i = 0; i < blockSize; ++i) { bL[(size_t) i] *= mk; bR[(size_t) i] *= mk; }
 
@@ -240,16 +236,19 @@ void benchGainStaging()
                 if (b > blocks / 2) {                 // settled half only
                     makeupSum += makeupDB;
                     limGRSum  += lim.getGainReductionDB();
+                    compGRSum += comp.getGainReductionDB();
                     ++counted;
                 }
             }
-            results[law][0] = makeupSum / counted;
-            results[law][1] = limGRSum / counted;
+            results[law][0] = compGRSum / counted;
+            results[law][1] = makeupSum / counted;
+            results[law][2] = limGRSum / counted;
         }
-        std::printf ("  %-5d  %+8.2f dB %8.2f dB   %+8.2f dB %8.2f dB\n",
-                     knob, results[0][0], results[0][1], results[1][0], results[1][1]);
+        std::printf ("  %-5d  %6.2f  %+6.2f  %5.2f   %6.2f  %+6.2f  %5.2f\n",
+                     knob, results[0][0], results[0][1], results[0][2],
+                           results[1][0], results[1][1], results[1][2]);
     }
-    std::printf ("  Limiter GR should stay low — it is a safety net, not the main gain stage.\n\n");
+    std::printf ("  All in dB. compGR should track the knob and match across levels.\n\n");
 }
 
 //==============================================================================
