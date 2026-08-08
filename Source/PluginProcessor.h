@@ -54,7 +54,6 @@ public:
     // True when output exceeds 0dBFS
     std::atomic<bool> outputClipping { false };
     std::atomic<bool> inputClipping { false };
-    std::atomic<bool> deClickMode { false };
     std::atomic<bool> rideMode { false };           // auto-leveling ride
     std::atomic<float> rideOffsetComp { 0.0f };     // offset in comp units (0-36) for editor display
 
@@ -143,9 +142,6 @@ private:
     void computeKWeightingCoeffs(double sampleRate);
     float applyBiquad(float x, BiquadState& s, const BiquadCoeffs& c);
 
-    // De-click: envelope for transient detection
-    float dcEnvL = 0.0f, dcEnvR = 0.0f;
-    float dcRelCoeff = 0.0f, dcSlowRelCoeff = 0.0f;
 
     // RIDE: auto-leveling — slow RMS tracker that adjusts comp offset
     float rideEnvDB = -60.0f;           // slow RMS envelope (~3 sec)

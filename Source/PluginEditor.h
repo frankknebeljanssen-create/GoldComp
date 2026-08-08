@@ -51,7 +51,6 @@ public:
     // HONEST mode button
     juce::Rectangle<int> honestBtnRect;
     juce::Rectangle<int> clipPillRect;
-    juce::Rectangle<int> deClickRect;
     juce::Rectangle<int> grBarRect, grTimelineRect, vocalStateRect;
     bool grTimelineFast = false;  // false=slow (full history), true=fast (zoomed in)
     juce::Rectangle<int> grSpeedToggleRect;

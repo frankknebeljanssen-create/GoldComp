@@ -138,12 +138,6 @@ void GoldCompProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     kShelfIn = {}; kHPIn = {}; kShelfOut = {}; kHPOut = {};
     computeKWeightingCoeffs(sampleRate);
 
-    // De-click: slow envelope for "normal level" tracking
-    // Attack: ~5ms (doesn't follow transients — they exceed the envelope)
-    // Release: ~20ms (holds level between syllables)
-    dcRelCoeff = std::exp(-1.0f / (float)(sampleRate * 0.005));  // same as attack for smooth tracking
-    dcSlowRelCoeff = std::exp(-1.0f / (float)(sampleRate * 0.020));
-    dcEnvL = 0.0f; dcEnvR = 0.0f;
 
     // RIDE: auto-leveling coefficients
     rideEnvCoeff = std::exp(-(float)1.0f / (float)(sampleRate * 2.0));     // ~2 sec RMS tracking
@@ -593,49 +587,6 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
 
         // (Input saturation removed — causes audible distortion on sub bass)
 
-        // 2c. De-Click: catches transient artifacts and hard consonants
-        // Two-stage approach:
-        //   Stage 1: Slow RMS envelope tracks the "normal" level (~10ms)
-        //   Stage 2: Anything exceeding that by >4dB gets soft-limited
-        if (deClickMode.load()) {
-            for (int i = 0; i < numSamples; ++i) {
-                float absL = std::abs(left[i]);
-                float absR = std::abs(right[i]);
-
-                // Slow envelope: tracks sustained level, ignores transients.
-                // 5 ms up, 20 ms down — the old comments said 2/15 ms but the
-                // coefficients in prepareToPlay were always 5/20.
-                float slowAttack = dcRelCoeff;
-                float slowRelease = dcSlowRelCoeff;
-
-                dcEnvL = (absL > dcEnvL) ? slowAttack * dcEnvL + (1.0f - slowAttack) * absL
-                                         : slowRelease * dcEnvL + (1.0f - slowRelease) * absL;
-                dcEnvR = (absR > dcEnvR) ? slowAttack * dcEnvR + (1.0f - slowAttack) * absR
-                                         : slowRelease * dcEnvR + (1.0f - slowRelease) * absR;
-
-                // Ceiling: 4dB above slow envelope (~1.6x)
-                float ceilL = juce::jmax(dcEnvL * 1.6f, 0.002f);
-                float ceilR = juce::jmax(dcEnvR * 1.6f, 0.002f);
-
-                // Soft knee with a continuous derivative. The 0.15 factor here
-                // used to leave the slope dropping from 1 to 0.3 at the knee —
-                // a 70% break, which radiates harmonics falling off only as
-                // 1/n^2, and at base rate everything above about the 7th order
-                // folds back. On sibilants that is audible grit from a stage
-                // called De-Click. Scaling by the same 0.5 as the `over`
-                // denominator makes the slope exactly 1 at the knee, so the
-                // harmonics fall as 1/n^3 instead.
-                if (absL > ceilL) {
-                    float over = (absL - ceilL) / (ceilL * 0.5f);
-                    left[i] = (left[i] > 0 ? 1.0f : -1.0f) * (ceilL + std::tanh(over) * ceilL * 0.5f);
-                }
-                if (absR > ceilR) {
-                    float over = (absR - ceilR) / (ceilR * 0.5f);
-                    right[i] = (right[i] > 0 ? 1.0f : -1.0f) * (ceilR + std::tanh(over) * ceilR * 0.5f);
-                }
-            }
-        }
-
         // Write dry signal into latency-compensated delay AFTER all pre-processing
         // This ensures dry and wet match in level, frequency content, and phase
         for (int i = 0; i < numSamples; ++i) {
@@ -763,23 +714,6 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
                 oversampler.processSamplesDown(block);
             }
 
-            // 6. Limiter — now the last gain stage, so the ceiling holds
-            limiter.process(left, right, numSamples, CEILING_DB);
-
-            // 6b. Safety clamp. The limiter holds the ceiling to within 0.03 dB
-            // now, so this only has to catch that residue. It used to be a
-            // rational saturator starting 2.5 dB *below* the ceiling, which made
-            // it the real peak controller — and being un-oversampled it produced
-            // -33 dBc of aliasing at 3 kHz, right in the sibilance band. A tight
-            // clamp shapes so little that its harmonics are negligible.
-            {
-                const float ceiling = std::pow(10.0f, CEILING_DB / 20.0f);
-                for (int i = 0; i < numSamples; ++i) {
-                    left[i]  = juce::jlimit(-ceiling, ceiling, left[i]);
-                    right[i] = juce::jlimit(-ceiling, ceiling, right[i]);
-                }
-            }
-
             // 7. Measure output LUFS BEFORE gain match (prevents feedback loop)
             {
                 float preMatchKSumSq = 0;
@@ -839,24 +773,33 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
                 }
                 prevOffsetLin = offsetLin;
 
-                // Safety: soft-clip after HONEST to prevent distortion from boosting
-                if (offsetLin > 1.01f) {
-                    float ceil = std::pow(10.0f, CEILING_DB / 20.0f);
-                    float ct = ceil * 0.92f;
-                    for (int i = 0; i < numSamples; ++i) {
-                        for (float* ch : { &left[i], &right[i] }) {
-                            float a = std::abs(*ch);
-                            if (a > ct) {
-                                float s = (*ch > 0) ? 1.0f : -1.0f;
-                                float o = (a - ct) / (ceil * 0.08f);
-                                *ch = s * (ct + std::tanh(o) * ceil * 0.08f);
-                            }
-                        }
-                    }
-                }
             } else {
                 prevOffsetLin = 1.0f;
                 gainMatchOffsetDB.store(0.0f);  // reset so HONEST starts clean
+            }
+
+            // 8b. Limiter — last gain stage before the mix.
+            // It sits after HONEST rather than before it: HONEST can boost by up
+            // to 6 dB, so applying it downstream of the limiter let it push past
+            // the ceiling, and the tanh waveshaper that used to patch that over
+            // was the last un-oversampled nonlinearity in the chain. With the
+            // limiter behind it the ceiling is binding again and the waveshaper
+            // is unnecessary. The loudness measurement above still happens
+            // before any gain match, so there is no feedback path.
+            limiter.process(left, right, numSamples, CEILING_DB);
+
+            // 8c. Safety clamp. The limiter holds the ceiling to within 0.03 dB
+            // now, so this only has to catch that residue. It used to be a
+            // rational saturator starting 2.5 dB *below* the ceiling, which made
+            // it the real peak controller — and being un-oversampled it produced
+            // -33 dBc of aliasing at 3 kHz, right in the sibilance band. A tight
+            // clamp shapes so little that its harmonics are negligible.
+            {
+                const float ceiling = std::pow(10.0f, CEILING_DB / 20.0f);
+                for (int i = 0; i < numSamples; ++i) {
+                    left[i]  = juce::jlimit(-ceiling, ceiling, left[i]);
+                    right[i] = juce::jlimit(-ceiling, ceiling, right[i]);
+                }
             }
 
             // 9. Latency-compensated Dry/Wet Mix — per-sample interpolated.

@@ -442,7 +442,6 @@ void GoldCompEditor::timerCallback()
             else if (saveBtnRect.contains(bp)) hoveredElement = "save";
             else if (loadBtnRect.contains(bp)) hoveredElement = "load";
             else if (clipPillRect.contains(bp)) hoveredElement = "clip";
-            else if (deClickRect.contains(bp)) hoveredElement = "dclk";
             else if (advToggleRect.contains(bp)) hoveredElement = "adv";
             else if (grBarRect.contains(bp)) hoveredElement = "gr";
             else if (grTimelineRect.contains(bp)) hoveredElement = "grtimeline";
@@ -521,11 +520,6 @@ void GoldCompEditor::mouseDown(const juce::MouseEvent& e)
     }
 
     // DE-CLICK toggle
-    if (deClickRect.contains(bp)) {
-        processor.deClickMode.store(!processor.deClickMode.load());
-        repaint(); return;
-    }
-
     // TRUE mode toggle
     if (honestBtnRect.contains(bp)) {
         bool on = !processor.honestMode.load();
@@ -970,10 +964,10 @@ void GoldCompEditor::paint(juce::Graphics& g)
     // CLIP + DE-CLICK buttons — right side, stacked
     {
         bool clipOn = processor.apvts.getRawParameterValue("clip")->load() > 1.0f;
-        bool dcOn = processor.deClickMode.load();
-        int pillW2 = 46, pillH2 = 20, pillGap2 = 4;
+        int pillW2 = 46, pillH2 = 20;
         int pillX2 = w - 16 - 12 - pillW2;
-        int pillY2 = kcY + (kcH - pillH2 * 2 - pillGap2) / 2 + 6;
+        // Single pill now that D-CLK is gone, so centre it on the knob row
+        int pillY2 = kcY + (kcH - pillH2) / 2 + 6;
 
         // CLIP
         float clipAct = clipOn ? processor.clipActivity.load() : 0.0f;
@@ -989,16 +983,6 @@ void GoldCompEditor::paint(juce::Graphics& g)
         g.setFont(juce::Font("Arial", 9.0f, juce::Font::bold));
         g.setColour(clipOn ? C::clipCol : C::label);
         g.drawText("CLIP", clipPillRect, juce::Justification::centred);
-
-        // DE-CLICK
-        deClickRect = juce::Rectangle<int>(pillX2, pillY2 + pillH2 + pillGap2, pillW2, pillH2);
-        g.setColour(dcOn ? C::accent.withAlpha(0.25f) : juce::Colour(0xff1e2330));
-        g.fillRoundedRectangle(deClickRect.toFloat(), 5.0f);
-        g.setColour(dcOn ? C::accent.withAlpha(0.7f) : juce::Colour(0xff444a58));
-        g.drawRoundedRectangle(deClickRect.toFloat(), 5.0f, 1.0f);
-        g.setFont(juce::Font("Arial", 9.0f, juce::Font::bold));
-        g.setColour(dcOn ? C::accent : C::label);
-        g.drawText("D-CLK", deClickRect, juce::Justification::centred);
     }
 
     // === GR TIMELINE + ADV PANEL (both inside collapsible ADV) ===
@@ -1153,7 +1137,6 @@ void GoldCompEditor::paint(juce::Graphics& g)
             else if (hoveredElement == "save") elBounds = saveBtnRect;
             else if (hoveredElement == "load") elBounds = loadBtnRect;
             else if (hoveredElement == "clip") elBounds = clipPillRect;
-            else if (hoveredElement == "dclk") elBounds = deClickRect;
             else if (hoveredElement == "adv") elBounds = advToggleRect;
             else if (hoveredElement == "gr") elBounds = grBarRect;
             else if (hoveredElement == "grtimeline") elBounds = grTimelineRect;
@@ -1212,14 +1195,12 @@ void GoldCompEditor::paint(juce::Graphics& g)
         };
 
         bool clipOn2 = processor.apvts.getRawParameterValue("clip")->load() > 1.0f;
-        bool dcOn2 = processor.deClickMode.load();
 
         // Left pills
         drawPill(advToggleRect, "ADV", advOpen, C::accent);
 
         // Right pills
         drawPill(clipPillRect, "CLIP", clipOn2, C::clipCol);
-        drawPill(deClickRect, "D-CLK", dcOn2, C::accent);
     }
 }
 
@@ -2061,17 +2042,6 @@ GoldCompEditor::TooltipInfo GoldCompEditor::getTooltipFor(const juce::String& el
         "2nd harmonic sweetener: 6% at full drive\n"
         "Oversampled 4x to prevent aliasing\n"
         "Activity meter on button: dim=idle, bright=active"
-    };
-    if (el == "dclk") return {
-        "De-Click",
-        "Per-sample transient suppressor placed before the compressor. "
-        "Tracks a slow envelope (5ms attack, 20ms release) and soft-limits "
-        "anything exceeding it by more than 4 dB. Reduces mouth clicks, "
-        "lip smacks, and digital pops without affecting normal dynamics.",
-        "Envelope: 5ms attack / 20ms release\n"
-        "Threshold: 4 dB above envelope (1.6× ratio)\n"
-        "Limiter: tanh soft-clip on transients\n"
-        "Position: before compressor in signal chain"
     };
     if (el == "adv") return {
         "Advanced Panel",
