@@ -115,10 +115,19 @@ void GoldCompProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     setLatencySamples(totalWetLatency);
 
     // Dry delay for latency-compensated mix
+    preparedBlockSize = samplesPerBlock;
     int delaySize = totalWetLatency + samplesPerBlock + 16;
     dryDelayL.assign(delaySize, 0.0f);
     dryDelayR.assign(delaySize, 0.0f);
     dryDelayWritePos = 0;
+    bypassDelayL.assign(delaySize, 0.0f);
+    bypassDelayR.assign(delaySize, 0.0f);
+    bypassDelayWritePos = 0;
+    // Crossfade scratch, preallocated: it used to be a 2048-sample stack array,
+    // so on a larger block the fade simply stopped after 2048 samples and the
+    // output jumped.
+    fadeFromL.assign((size_t)samplesPerBlock, 0.0f);
+    fadeFromR.assign((size_t)samplesPerBlock, 0.0f);
 
     // Force the signal HPF to redesign its coefficients. Without this the knob
     // deadband below keeps the *previous* sample rate's coefficients, so after a
@@ -137,6 +146,8 @@ void GoldCompProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     dcBlockL = dcBlockR = dcPrevInL = dcPrevInR = 0.0f;
     prevBypassed = false;
 
+    smoothedInMS = 0.0f;
+    smoothedOutMS = 0.0f;
     smoothedInLUFS = 0.0f;
     smoothedOutLUFS = 0.0f;
     smoothedPeakDB = -60.0f;
@@ -239,6 +250,10 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
 
     int numSamples = buffer.getNumSamples();
     if (numSamples == 0) return;
+    // Everything downstream is sized for the block size prepareToPlay was given.
+    // A host handing us more would overrun the oversamplers' internal buffers,
+    // which JUCE only guards with a jassert that compiles out in Release.
+    numSamples = juce::jmin(numSamples, preparedBlockSize);
     float* left = buffer.getWritePointer(0);
     float* right = buffer.getWritePointer(1);
 
@@ -257,14 +272,35 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
 
     bool bypassed = apvts.getRawParameterValue("bypass")->load() > 0.5f;
 
-    // Save dry input for bypass crossfade (stack buffer, max typical block size)
-    constexpr int MAX_BUF = 2048;
-    float dryL[MAX_BUF], dryR[MAX_BUF];
-    int ns = juce::jmin(numSamples, MAX_BUF);
+    // Raw input into the bypass delay line, always, so the bypass path and the
+    // crossfade always have latency-aligned material available regardless of
+    // which state we were in last block.
+    {
+        const int bdSize = (int)bypassDelayL.size();
+        for (int i = 0; i < numSamples; ++i) {
+            bypassDelayL[(size_t)bypassDelayWritePos] = left[i];
+            bypassDelayR[(size_t)bypassDelayWritePos] = right[i];
+            bypassDelayWritePos = (bypassDelayWritePos + 1) % bdSize;
+        }
+    }
+
+    // Crossfade source: the delayed raw input, i.e. exactly what the bypassed
+    // path outputs. It used to be the *undelayed* input, so the fade mixed two
+    // signals 67 samples apart — a comb sweep — and then ended on the undelayed
+    // one, so the next block jumped back by that much. A click either way.
+    const int ns = juce::jmin(numSamples, (int)fadeFromL.size());
     if (bypassed != prevBypassed) {
-        for (int i = 0; i < ns; ++i) { dryL[i] = left[i]; dryR[i] = right[i]; }
-        // Reset oversampler on bypass toggle to prevent stale buffer artifacts
+        const int bdSize = (int)bypassDelayL.size();
+        const int base = (bypassDelayWritePos - numSamples + bdSize * 2) % bdSize;
+        for (int i = 0; i < ns; ++i) {
+            int rp = (base + i - totalWetLatency + bdSize * 2) % bdSize;
+            fadeFromL[(size_t)i] = bypassDelayL[(size_t)rp];
+            fadeFromR[(size_t)i] = bypassDelayR[(size_t)rp];
+        }
+        // Clear stale oversampler state so re-engaging does not dump it into the
+        // signal. Both need it, not just the compressor's.
         compOS.reset();
+        oversampler.reset();
     }
 
     // Knob 0-36, negated for processing. There used to be a 29/36 remap here
@@ -281,6 +317,7 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     float hpfFreq  = apvts.getRawParameterValue("hpf")->load();
     float scHpFreq = apvts.getRawParameterValue("schpf")->load();
     float mixAmt   = apvts.getRawParameterValue("mix")->load() / 100.0f;
+    float inTrimDB = apvts.getRawParameterValue("inTrim")->load();
 
     // Input metering + K-weighted LUFS
     float inPL = 0, inPR = 0, inKSumSq = 0;
@@ -294,11 +331,21 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
         inKSumSq += kFiltered * kFiltered;
     }
     inputPeakL.store(inPL); inputPeakR.store(inPR);
-    float blockInLUFS = std::sqrt(inKSumSq / (float)numSamples);
+    // Integrate MEAN SQUARE, not amplitude. Smoothing sqrt(mean-square) under-
+    // reads, and because sqrt is concave the deficit grows with inter-block level
+    // variance — so it under-read the dynamic input more than the compressed
+    // output, and unlike a filter-shape error that bias does not cancel between
+    // the two chains. HONEST was under-matching by up to 0.66 dB, more the harder
+    // the compression, which is the opposite of what the mode promises.
+    float blockInMS = inKSumSq / (float)numSamples;
     // Block-size independent smoothing: ~800ms time constant (slow enough for knob changes)
     float lufsSmooth = std::exp(-(float)numSamples / (float)(currentSampleRate * 0.800));
-    smoothedInLUFS = smoothedInLUFS * lufsSmooth + blockInLUFS * (1.0f - lufsSmooth);
-    if (! std::isfinite(smoothedInLUFS)) smoothedInLUFS = 0.0f;
+    smoothedInMS = smoothedInMS * lufsSmooth + blockInMS * (1.0f - lufsSmooth);
+    if (! std::isfinite(smoothedInMS) || smoothedInMS < 0.0f) smoothedInMS = 0.0f;
+    // Input is measured before In Trim, but trim is a pure gain, so scaling the
+    // result is exact and avoids HONEST fighting the user's trim: pull trim down
+    // and it used to try to put up to 6 dB back.
+    smoothedInLUFS = std::sqrt(smoothedInMS) * std::pow(10.0f, inTrimDB / 20.0f);
     inputRMS.store(smoothedInLUFS);
 
     // === Signal analysis for Sweet Spot ===
@@ -490,7 +537,6 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     if (!bypassed)
     {
         // 0. Input Trim — per-sample interpolated to prevent zipper noise
-        float inTrimDB = apvts.getRawParameterValue("inTrim")->load();
         float trimLin = std::pow(10.0f, inTrimDB / 20.0f);
         if (std::abs(trimLin - 1.0f) > 0.0001f || std::abs(prevTrimLin - 1.0f) > 0.0001f) {
             float trimDelta = (trimLin - prevTrimLin) / (float)numSamples;
@@ -721,12 +767,14 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
                     kFiltered = applyBiquad(kFiltered, kHPOut, kHPCoeffs);
                     preMatchKSumSq += kFiltered * kFiltered;
                 }
-                float preMatchLUFS = std::sqrt(preMatchKSumSq / (float)numSamples);
+                // Mean square, for the same reason as the input chain above
+                float preMatchMS = preMatchKSumSq / (float)numSamples;
 
                 // Slow smoothing: 800ms — survives rapid knob movement
                 float outLufsSmooth = std::exp(-(float)numSamples / (float)(currentSampleRate * 0.800));
-                smoothedOutLUFS = smoothedOutLUFS * outLufsSmooth + preMatchLUFS * (1.0f - outLufsSmooth);
-                if (! std::isfinite(smoothedOutLUFS)) smoothedOutLUFS = 0.0f;
+                smoothedOutMS = smoothedOutMS * outLufsSmooth + preMatchMS * (1.0f - outLufsSmooth);
+                if (! std::isfinite(smoothedOutMS) || smoothedOutMS < 0.0f) smoothedOutMS = 0.0f;
+                smoothedOutLUFS = std::sqrt(smoothedOutMS);
 
                 // Only update offset when both signals are above noise floor
                 float inLevelDB = (smoothedInLUFS > 1e-10f) ? 20.0f * std::log10(smoothedInLUFS) : -100.0f;
@@ -827,16 +875,19 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     }
     else
     {
-        // Bypassed: delay signal by totalWetLatency to match DAW's latency compensation
-        // Without this, bypassed signal arrives early vs other tracks
-        int dlyS = (int)dryDelayL.size();
-        for (int i = 0; i < numSamples; ++i) {
-            dryDelayL[(size_t)dryDelayWritePos] = left[i];
-            dryDelayR[(size_t)dryDelayWritePos] = right[i];
-            int readPos = (dryDelayWritePos - totalWetLatency + dlyS * 2) % dlyS;
-            left[i] = dryDelayL[(size_t)readPos];
-            right[i] = dryDelayR[(size_t)readPos];
-            dryDelayWritePos = (dryDelayWritePos + 1) % dlyS;
+        // Bypassed: read the raw input back out delayed by the wet latency, so a
+        // bypassed instance stays aligned with the rest of the session instead of
+        // arriving early. Reads the dedicated bypass line, which always holds raw
+        // input — the Mix line is written after trim, HPF and De-Click, so
+        // bypassing used to start with up to 12 dB of trim baked in.
+        {
+            const int bdSize = (int)bypassDelayL.size();
+            const int base = (bypassDelayWritePos - numSamples + bdSize * 2) % bdSize;
+            for (int i = 0; i < numSamples; ++i) {
+                int readPos = (base + i - totalWetLatency + bdSize * 2) % bdSize;
+                left[i]  = bypassDelayL[(size_t)readPos];
+                right[i] = bypassDelayR[(size_t)readPos];
+            }
         }
     }
 
@@ -866,12 +917,12 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
             float fade = 0.5f * (1.0f - std::cos(t * juce::MathConstants<float>::pi));
             if (bypassed) {
                 // Fading TO bypass: processed → dry
-                left[i]  = left[i] * (1.0f - fade) + dryL[i] * fade;
-                right[i] = right[i] * (1.0f - fade) + dryR[i] * fade;
+                left[i]  = left[i] * (1.0f - fade) + fadeFromL[(size_t)i] * fade;
+                right[i] = right[i] * (1.0f - fade) + fadeFromR[(size_t)i] * fade;
             } else {
                 // Fading FROM bypass: dry → processed
-                left[i]  = dryL[i] * (1.0f - fade) + left[i] * fade;
-                right[i] = dryR[i] * (1.0f - fade) + right[i] * fade;
+                left[i]  = fadeFromL[(size_t)i] * (1.0f - fade) + left[i] * fade;
+                right[i] = fadeFromR[(size_t)i] * (1.0f - fade) + right[i] * fade;
             }
         }
         prevBypassed = bypassed;
@@ -892,6 +943,11 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
 }
 
 juce::AudioProcessorEditor* GoldCompProcessor::createEditor() { return new GoldCompEditor(*this); }
+
+juce::AudioProcessorParameter* GoldCompProcessor::getBypassParameter() const
+{
+    return apvts.getParameter("bypass");
+}
 
 void GoldCompProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
@@ -921,12 +977,17 @@ void GoldCompProcessor::computeKWeightingCoeffs(double sampleRate)
         double Q  = 0.7071752369554196;
         double K  = std::tan(juce::MathConstants<double>::pi * fc / sampleRate);
         double K2 = K * K;
-        double a0 = 1.0 + K / (Q * Vb) + K2;
+        // The denominator is 1 + K/Q + K^2 — no Vb. It used to carry a stray Vb
+        // in both a0 and a2, which raised the shelf's effective Q from 0.707 to
+        // 0.890 and made it resonant: +4.44 dB at 1682 Hz against a +4.00 dB
+        // asymptote, a 2 dB error, peaking near +4.95 dB around 1.2 kHz.
+        // Without it these match BS.1770-4 Table 1 to 14 digits.
+        double a0 = 1.0 + K / Q + K2;
         kShelfCoeffs.b0 = (float)((Vh + Vb * K / Q + K2) / a0);
         kShelfCoeffs.b1 = (float)((2.0 * (K2 - Vh)) / a0);
         kShelfCoeffs.b2 = (float)((Vh - Vb * K / Q + K2) / a0);
         kShelfCoeffs.a1 = (float)((2.0 * (K2 - 1.0)) / a0);
-        kShelfCoeffs.a2 = (float)((1.0 - K / (Q * Vb) + K2) / a0);
+        kShelfCoeffs.a2 = (float)((1.0 - K / Q + K2) / a0);
     }
 
     // Stage 2: RLB weighting (high-pass, ~38Hz)
@@ -936,9 +997,12 @@ void GoldCompProcessor::computeKWeightingCoeffs(double sampleRate)
         double K  = std::tan(juce::MathConstants<double>::pi * fc / sampleRate);
         double K2 = K * K;
         double a0 = 1.0 + K / Q + K2;
-        kHPCoeffs.b0 = (float)(1.0 / a0);
-        kHPCoeffs.b1 = (float)(-2.0 / a0);
-        kHPCoeffs.b2 = (float)(1.0 / a0);
+        // BS.1770 specifies b = {1, -2, 1} un-normalised, so the passband gain is
+        // exactly 1. Dividing these by a0 made the reading sample-rate dependent
+        // by about 0.04 dB.
+        kHPCoeffs.b0 = 1.0f;
+        kHPCoeffs.b1 = -2.0f;
+        kHPCoeffs.b2 = 1.0f;
         kHPCoeffs.a1 = (float)((2.0 * (K2 - 1.0)) / a0);
         kHPCoeffs.a2 = (float)((1.0 - K / Q + K2) / a0);
     }

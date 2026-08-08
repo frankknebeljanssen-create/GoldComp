@@ -30,6 +30,9 @@ public:
     void changeProgramName(int, const juce::String&) override {}
     void getStateInformation(juce::MemoryBlock&) override;
     void setStateInformation(const void*, int) override;
+    // Lets the host drive the same bypass the UI button does, so both apply the
+    // reported latency instead of the host's default pass-through jumping early.
+    juce::AudioProcessorParameter* getBypassParameter() const override;
 
     juce::UndoManager undoManager;
     juce::AudioProcessorValueTreeState apvts;
@@ -98,10 +101,18 @@ private:
     float dcBlockCoeff = 0.9995f; // computed from SR in prepareToPlay
 
     bool prevBypassed = false;  // for bypass crossfade
+    std::vector<float> fadeFromL, fadeFromR;   // crossfade source, preallocated
 
-    std::vector<float> dryDelayL, dryDelayR;
+    std::vector<float> dryDelayL, dryDelayR;      // post-trim, feeds the Mix control
     int dryDelayWritePos = 0;
+    // Raw input, delayed by the wet latency. Bypass and the bypass crossfade both
+    // read from here so they are aligned with the processed path and with the
+    // rest of the session. The Mix delay line cannot serve this purpose: it is
+    // written after trim, HPF and De-Click.
+    std::vector<float> bypassDelayL, bypassDelayR;
+    int bypassDelayWritePos = 0;
     int totalWetLatency = 0;
+    int preparedBlockSize = 512;
 
     // Per-sample interpolation state (anti-zipper)
     float prevTrimLin = 1.0f;
@@ -120,6 +131,10 @@ private:
     BiquadCoeffs kShelfCoeffs, kHPCoeffs;
     BiquadState kShelfIn, kHPIn;   // input measurement chain
     BiquadState kShelfOut, kHPOut;  // output measurement chain
+    // Mean-square accumulators; the LUFS values are their square roots.
+    // BS.1770 integrates power, not amplitude.
+    float smoothedInMS = 0.0f;
+    float smoothedOutMS = 0.0f;
     float smoothedInLUFS = 0.0f;
     float smoothedOutLUFS = 0.0f;
 
