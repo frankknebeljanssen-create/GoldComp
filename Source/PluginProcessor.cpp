@@ -194,6 +194,19 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     float* left = buffer.getWritePointer(0);
     float* right = buffer.getWritePointer(1);
 
+    // Sanitize the input before anything recursive touches it. A single NaN or
+    // Inf sample would otherwise poison the envelope followers, DC blocker and
+    // LUFS accumulators permanently — they are pure IIR state with no way back,
+    // so the plugin would stay silent until it is reloaded. The clamp is far
+    // above any real signal (1e6 ~ +120 dBFS) and only exists to keep squares
+    // and makeup gain inside float range.
+    for (int i = 0; i < numSamples; ++i) {
+        if (! std::isfinite(left[i]))  left[i]  = 0.0f;
+        if (! std::isfinite(right[i])) right[i] = 0.0f;
+        left[i]  = juce::jlimit(-1.0e6f, 1.0e6f, left[i]);
+        right[i] = juce::jlimit(-1.0e6f, 1.0e6f, right[i]);
+    }
+
     bool bypassed = apvts.getRawParameterValue("bypass")->load() > 0.5f;
 
     // Save dry input for bypass crossfade (stack buffer, max typical block size)
@@ -230,6 +243,7 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     // Block-size independent smoothing: ~800ms time constant (slow enough for knob changes)
     float lufsSmooth = std::exp(-(float)numSamples / (float)(currentSampleRate * 0.800));
     smoothedInLUFS = smoothedInLUFS * lufsSmooth + blockInLUFS * (1.0f - lufsSmooth);
+    if (! std::isfinite(smoothedInLUFS)) smoothedInLUFS = 0.0f;
     inputRMS.store(smoothedInLUFS);
 
     // === Signal analysis for Sweet Spot ===
@@ -642,12 +656,17 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
                 // Slow smoothing: 800ms — survives rapid knob movement
                 float outLufsSmooth = std::exp(-(float)numSamples / (float)(currentSampleRate * 0.800));
                 smoothedOutLUFS = smoothedOutLUFS * outLufsSmooth + preMatchLUFS * (1.0f - outLufsSmooth);
+                if (! std::isfinite(smoothedOutLUFS)) smoothedOutLUFS = 0.0f;
 
                 // Only update offset when both signals are above noise floor
                 float inLevelDB = (smoothedInLUFS > 1e-10f) ? 20.0f * std::log10(smoothedInLUFS) : -100.0f;
                 float outLevelDB = (smoothedOutLUFS > 1e-10f) ? 20.0f * std::log10(smoothedOutLUFS) : -100.0f;
                 if (inLevelDB > -50.0f && outLevelDB > -50.0f) {
                     float diffDB = 20.0f * std::log10(smoothedInLUFS / smoothedOutLUFS);
+                    // jlimit cannot filter NaN — every comparison against it is
+                    // false, so it would pass both clamps below and end up
+                    // multiplied into the audio.
+                    if (! std::isfinite(diffDB)) diffDB = 0.0f;
                     diffDB = juce::jlimit(-18.0f, 6.0f, diffDB);
                     // Slew-limit: max 0.5dB per 50ms — ultra-smooth even during fast knob turns
                     float prevOffset = gainMatchOffsetDB.load();
@@ -744,6 +763,12 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
             dcPrevInL = left[i]; dcPrevInR = right[i];
             dcBlockL = outL; dcBlockR = outR;
             left[i] = outL; right[i] = outR;
+        }
+        // This filter has no path back from a non-finite state, so check once
+        // per block rather than per sample.
+        if (! std::isfinite(dcBlockL) || ! std::isfinite(dcBlockR)
+            || ! std::isfinite(dcPrevInL) || ! std::isfinite(dcPrevInR)) {
+            dcBlockL = dcBlockR = dcPrevInL = dcPrevInR = 0.0f;
         }
     }
 

@@ -37,6 +37,10 @@ public:
         smoothCoeff1 = std::exp(-1.0f / (float(sr) * 0.0003f));  // 0.3ms
         smoothCoeff2 = std::exp(-1.0f / (float(sr) * 0.0008f));  // 0.8ms
 
+        // GR meter ballistics — 2.3ms, matching the old hardcoded 0.99 at
+        // 44.1kHz but now correct at every sample rate
+        grMeterCoeff = std::exp(-1.0f / (float(sr) * 0.0023f));
+
         envelope = 0.0f;
         prevAppliedGain = 1.0f;
         smoothedGainDB = 0.0f;
@@ -135,9 +139,18 @@ public:
             bufferR[i] = dR * appliedGain;
 
             // GR metering (smooth)
-            float grDB = (appliedGain < 0.999f) ? -20.0f * std::log10(appliedGain) : 0.0f;
-            currentGR = currentGR * 0.99f + grDB * 0.01f;
+            float grDB = (appliedGain > 1.0e-10f && appliedGain < 0.999f)
+                       ? -20.0f * std::log10(appliedGain) : 0.0f;
+            currentGR = currentGR * grMeterCoeff + grDB * (1.0f - grMeterCoeff);
         }
+
+        // envelope and both smoothing stages are pure IIR state. A single Inf
+        // sample would drive smoothedGainDB to -Inf and leave the limiter
+        // outputting permanent silence, so recover rather than latch.
+        if (! (std::isfinite(envelope) && std::isfinite(smoothedGainDB)
+            && std::isfinite(smoothedGainDB2) && std::isfinite(prevAppliedGain)
+            && std::isfinite(currentGR)))
+            reset();
     }
 
     float getGainReductionDB() const { return currentGR; }
@@ -147,6 +160,7 @@ private:
     double sr = 44100.0;
     float relFastCoeff = 0.0f, relSlowCoeff = 0.0f;
     float smoothCoeff1 = 0.0f, smoothCoeff2 = 0.0f;
+    float grMeterCoeff = 0.0f;
     float envelope = 0.0f;
     float prevAppliedGain = 1.0f;
     float smoothedGainDB = 0.0f, smoothedGainDB2 = 0.0f;

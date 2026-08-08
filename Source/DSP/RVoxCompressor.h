@@ -78,27 +78,13 @@ public:
         delayBufferL.assign(LOOKAHEAD_SAMPLES + 1, 0.0f);
         delayBufferR.assign(LOOKAHEAD_SAMPLES + 1, 0.0f);
         gainDBBuffer.assign(LOOKAHEAD_SAMPLES + 1, 0.0f);
-        delayWritePos = 0;
 
-        envDB = -100.0f;
-        rmsSquaredSum = 0.0f;
-        peakEnv = 0.0f;
-        expanderEnvDB = -100.0f;
-        gainReductionDB = 0.0f;
-        smoothGR = 0.0f;
-        smoothExpanderGainDB = 0.0f;
-        smoothedGainDB = 0.0f;
-        prevGrDB = 0.0f;
-
-        grHistory.fill(0.0f);
-        inputHistory.fill(-100.0f);
-        outputHistory.fill(-100.0f);
-        grHistoryWritePos = 0;
-        grHistorySampleCounter = 0;
-        grHistoryBlockAccum = 0.0f;
-        inputHistoryBlockAccum = -100.0f;
-        outputHistoryBlockAccum = -100.0f;
         grHistorySamplesPerSlot = std::max(1, (int)(sr / 86.0));
+
+        // Clear runtime state through reset() rather than repeating the list
+        // here — the two copies had already drifted apart, leaving stale gain
+        // and filter state to click on the first sample after a re-prepare.
+        reset();
     }
 
     void reset()
@@ -115,6 +101,11 @@ public:
         smoothGR = 0.0f;
         smoothExpanderGainDB = 0.0f;
         smoothedGainDB = 0.0f;
+        smoothedGainDB2 = 0.0f;
+        prevAppliedGainLin = 1.0f;
+        detLowLP = 0.0f;
+        gateOpen = true;
+        scHpfX1 = scHpfX2 = scHpfY1 = scHpfY2 = 0.0f;
         prevGrDB = 0.0f;
         grHistory.fill(0.0f);
         inputHistory.fill(-100.0f);
@@ -456,6 +447,8 @@ public:
             // Per-sample GR metering — must be inside loop for correct timing
             smoothGR = grMeterCoeff * smoothGR + (1.0f - grMeterCoeff) * grDB;
         }
+
+        sanitizeState();
     }
 
     float getGainReductionDB() const { return smoothGR; }
@@ -472,6 +465,25 @@ public:
     bool characterMode = false;  // true = CHARACTER (warmth+transformer+presence), false = CLEAN
 
 private:
+    // Every follower and filter below is pure IIR state: once it holds a NaN or
+    // Inf it can never return to a valid value on its own, and the -100 dB
+    // fallback in the detector turns that into "no signal" rather than an
+    // audible fault — the compressor would just silently stop compressing.
+    // Checked once per block, so the cost is negligible.
+    void sanitizeState()
+    {
+        bool bad = ! (std::isfinite(rmsSquaredSum) && std::isfinite(peakEnv)
+                   && std::isfinite(envDB) && std::isfinite(expanderEnvDB)
+                   && std::isfinite(smoothedGainDB) && std::isfinite(smoothedGainDB2)
+                   && std::isfinite(prevAppliedGainLin) && std::isfinite(detLowLP)
+                   && std::isfinite(smoothExpanderGainDB) && std::isfinite(smoothGR));
+        if (! bad)
+            bad = ! (std::isfinite(scHpfX1) && std::isfinite(scHpfX2)
+                  && std::isfinite(scHpfY1) && std::isfinite(scHpfY2));
+        if (bad)
+            reset();
+    }
+
     // Warm soft-knee with smoothstep S-curve
     float computeGainReduction(float inputDB, float thresholdDB, float ratio, float kneeDB) const
     {
