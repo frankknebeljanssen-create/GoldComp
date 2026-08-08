@@ -14,6 +14,13 @@ GoldCompProcessor::~GoldCompProcessor() {}
 juce::AudioProcessorValueTreeState::ParameterLayout GoldCompProcessor::createParameterLayout()
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
+
+    // Only parameters the processor actually reads. Eleven others used to be
+    // registered here — clipmode, lookahead, boost, attackMs, relFastMs,
+    // relSlowMs, kneeW, grRange, oversample, ratioMult, transProtect — none of
+    // which were ever read: processBlock hardcoded their effects. They still
+    // showed up in the host's automation list and got saved into sessions, so a
+    // user could automate a control that did nothing.
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID("bypass", 1), "Bypass", false));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
@@ -31,46 +38,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout GoldCompProcessor::createPar
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("clip", 1), "Soft Clip",
         juce::NormalisableRange<float>(0.0f, 100.0f, 1.0f), 0.0f));
-    params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        juce::ParameterID("clipmode", 1), "Clip Mode",
-        juce::StringArray { "Clean", "Tube", "Tape", "Hard" }, 0));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("mix", 1), "Mix",
         juce::NormalisableRange<float>(0.0f, 100.0f, 1.0f), 100.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("gate", 1), "Gate",
         juce::NormalisableRange<float>(-80.0f, -20.0f, 0.1f), -80.0f));
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID("lookahead", 1), "Lookahead", true));
-    params.push_back(std::make_unique<juce::AudioParameterInt>(
-        juce::ParameterID("boost", 1), "Boost", 0, 2, 0));
-    // ADV panel parameters
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("attackMs", 1), "Attack",
-        juce::NormalisableRange<float>(0.01f, 10.0f, 0.01f, 0.4f), 0.1f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("relFastMs", 1), "Rel Fast",
-        juce::NormalisableRange<float>(10.0f, 200.0f, 1.0f), 60.0f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("relSlowMs", 1), "Rel Slow",
-        juce::NormalisableRange<float>(200.0f, 2000.0f, 10.0f), 700.0f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("kneeW", 1), "Knee",
-        juce::NormalisableRange<float>(2.0f, 20.0f, 0.5f), 10.0f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("grRange", 1), "GR Range",
-        juce::NormalisableRange<float>(1.0f, 36.0f, 0.5f), 36.0f));
-    params.push_back(std::make_unique<juce::AudioParameterInt>(
-        juce::ParameterID("oversample", 1), "Oversample", 0, 2, 0));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("inTrim", 1), "In Trim",
         juce::NormalisableRange<float>(-12.0f, 12.0f, 0.1f), 0.0f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("ratioMult", 1), "Ratio",
-        juce::NormalisableRange<float>(0.3f, 3.0f, 0.01f), 1.0f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("transProtect", 1), "Trans Protect",
-        juce::NormalisableRange<float>(0.0f, 100.0f, 1.0f), 55.0f));
+
     return { params.begin(), params.end() };
 }
 
@@ -687,10 +664,6 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
         // Sidechain HPF: filters detector only, bass passes through to output
         compressor.setScHpfFreq(scHpFreq);
 
-        // Delta mode: compressor outputs what compression removes instead of compressed signal
-        bool isDelta = deltaMode.load() && compDB < -0.5f;
-        compressor.outputDelta = isDelta;  // compressor outputs delayed*(1-gain) when true
-
         // Compressor — fixed 2x oversampling for alias-free gain modulation
         {
             juce::dsp::AudioBlock<float> block(buffer);
@@ -702,15 +675,6 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
             compOS.processSamplesDown(block);
         }
 
-        if (isDelta)
-        {
-            // === DELTA MODE ===
-            // Compressor already output what compression removes (delayed*(1-gain))
-            // Run limiter for consistent latency (won't actually limit — delta is quiet)
-            limiter.process(left, right, numSamples, 0.0f);
-            // Skip makeup, clipper, gain match, mix — pure compression delta
-        }
-        else
         {
             // === NORMAL OUTPUT PATH ===
 

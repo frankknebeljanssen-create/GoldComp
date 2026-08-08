@@ -51,22 +51,8 @@ public:
         scHpfX1 = scHpfX2 = scHpfY1 = scHpfY2 = 0.0f;
         scHpfLastFreq = -1.0f;
 
-        warmDcCoeff = 1.0f - (2.0f * juce::MathConstants<float>::pi * 5.0f / (float)sampleRate);
-        warmDcCoeff = juce::jlimit(0.995f, 0.9999f, warmDcCoeff);
-        warmDcPrevInL = warmDcPrevInR = warmDcPrevOutL = warmDcPrevOutR = 0.0f;
 
-        // Transformer coloration coefficients
-        // LP at ~16kHz (treble softening — subtle analog rolloff)
-        xfmrLpCoeff = 1.0f - std::exp(-2.0f * juce::MathConstants<float>::pi * 16000.0f / (float)sampleRate);
-        xfmrLpL = xfmrLpR = 0.0f;
-        // HP at ~25Hz (bass tightening — transformer coupling cap)
-        xfmrHpCoeff = 1.0f - (2.0f * juce::MathConstants<float>::pi * 25.0f / (float)sampleRate);
-        xfmrHpCoeff = juce::jlimit(0.995f, 0.9999f, xfmrHpCoeff);
-        xfmrHpPrevInL = xfmrHpPrevInR = xfmrHpPrevOutL = xfmrHpPrevOutR = 0.0f;
 
-        // Vocal presence: LP at ~3kHz for high-shelf extraction
-        presLpCoeff = 1.0f - std::exp(-2.0f * juce::MathConstants<float>::pi * 3000.0f / (float)sampleRate);
-        presLpL = presLpR = 0.0f;
 
         // Gain smoothing in dB domain: ~3ms time constant
         gainSmoothCoeff = std::exp(-1.0f / (float(sr) * 0.003f));
@@ -130,10 +116,6 @@ public:
         grHistoryBlockAccum = 0.0f;
         inputHistoryBlockAccum = -100.0f;
         outputHistoryBlockAccum = -100.0f;
-        warmDcPrevInL = warmDcPrevInR = warmDcPrevOutL = warmDcPrevOutR = 0.0f;
-        xfmrLpL = xfmrLpR = 0.0f;
-        xfmrHpPrevInL = xfmrHpPrevInR = xfmrHpPrevOutL = xfmrHpPrevOutR = 0.0f;
-        presLpL = presLpR = 0.0f;
     }
 
     void setReleaseTimes(float fastSec, float slowSec)
@@ -170,7 +152,6 @@ public:
     float userKneeWidth = 10.0f;
     float maxGainReductionDB = 36.0f;
     float ratioMultiplier = 1.0f; // Adjustable via ADV display dot (Y axis)
-    bool outputDelta = false;
 
     void process(float* bufferL, float* bufferR, int numSamples, float compDB,
                  float gateThreshDB = -80.0f,
@@ -200,13 +181,8 @@ public:
                 float appliedGain = prevAppliedGainLin + (targetGain - prevAppliedGainLin) * 0.5f;
                 prevAppliedGainLin = targetGain;
 
-                if (outputDelta) {
-                    bufferL[i] = delayedL - delayedL * appliedGain;
-                    bufferR[i] = delayedR - delayedR * appliedGain;
-                } else {
-                    bufferL[i] = delayedL * appliedGain;
-                    bufferR[i] = delayedR * appliedGain;
-                }
+                bufferL[i] = delayedL * appliedGain;
+                bufferR[i] = delayedR * appliedGain;
                 delayWritePos = (delayWritePos + 1) % (int)delayBufferL.size();
                 float bypassInDB = 20.0f * std::log10(std::max(1e-10f, std::abs(bufferL[i]) + std::abs(bufferR[i])) * 0.5f);
                 pushGRHistory(0.0f, bypassInDB);
@@ -241,8 +217,6 @@ public:
         float baseKneeDB = userKneeWidth;
         // RMS-dominant detection
         float peakBlend = 0.08f + compAmount * 0.12f;
-        // Harmonic warmth: scales quadratically with compression (gentle at low, present at high)
-        float warmthAmount = compAmount * compAmount * 0.05f;  // 0 → 0.05 at max (~0.7% THD)
 
         for (int i = 0; i < numSamples; ++i)
         {
@@ -436,46 +410,8 @@ public:
 
             delayWritePos = (delayWritePos + 1) % (int)delayBufferL.size();
 
-            bufferL[i] = outputDelta ? (delayedL - delayedL * appliedGain) : (delayedL * appliedGain);
-            bufferR[i] = outputDelta ? (delayedR - delayedR * appliedGain) : (delayedR * appliedGain);
-
-            // ===== CHARACTER STAGE (bypassed in CLEAN mode) =====
-            if (!outputDelta && characterMode && warmthAmount > 0.001f) {
-                // 1. Second harmonic warmth: x + k*x²
-                float wL = bufferL[i];
-                float wR = bufferR[i];
-                bufferL[i] = wL + warmthAmount * wL * wL;
-                bufferR[i] = wR + warmthAmount * wR * wR;
-                // DC offset from x² removed by 1-pole HP
-                float outL = bufferL[i] - warmDcPrevInL + warmDcCoeff * warmDcPrevOutL;
-                warmDcPrevInL = bufferL[i]; warmDcPrevOutL = outL;
-                bufferL[i] = outL;
-                float outR = bufferR[i] - warmDcPrevInR + warmDcCoeff * warmDcPrevOutR;
-                warmDcPrevInR = bufferR[i]; warmDcPrevOutR = outR;
-                bufferR[i] = outR;
-
-                // 2. Transformer coloration: gentle bass rolloff + treble rolloff
-                // LP at ~16kHz (treble softening)
-                xfmrLpL += xfmrLpCoeff * (bufferL[i] - xfmrLpL);
-                xfmrLpR += xfmrLpCoeff * (bufferR[i] - xfmrLpR);
-                bufferL[i] = xfmrLpL;
-                bufferR[i] = xfmrLpR;
-                // HP at ~25Hz (bass tightening)
-                float hpOutL = bufferL[i] - xfmrHpPrevInL + xfmrHpCoeff * xfmrHpPrevOutL;
-                xfmrHpPrevInL = bufferL[i]; xfmrHpPrevOutL = hpOutL;
-                bufferL[i] = hpOutL;
-                float hpOutR = bufferR[i] - xfmrHpPrevInR + xfmrHpCoeff * xfmrHpPrevOutR;
-                xfmrHpPrevInR = bufferR[i]; xfmrHpPrevOutR = hpOutR;
-                bufferR[i] = hpOutR;
-
-                // 3. Vocal presence: subtle 2-4kHz boost via 1-pole shelf
-                // presLP tracks the low-frequency component; presence = input - LP
-                float presAmount = warmthAmount * 2.5f;  // scales with compression
-                presLpL += presLpCoeff * (bufferL[i] - presLpL);
-                presLpR += presLpCoeff * (bufferR[i] - presLpR);
-                bufferL[i] += (bufferL[i] - presLpL) * presAmount;
-                bufferR[i] += (bufferR[i] - presLpR) * presAmount;
-            }
+            bufferL[i] = delayedL * appliedGain;
+            bufferR[i] = delayedR * appliedGain;
 
             gainReductionDB = grDB;
             prevGrDB = grDB;
@@ -502,7 +438,6 @@ public:
     // with release/acquire so the compiler cannot cache or reorder it — with LTO
     // enabled a plain int could be hoisted out of the paint loop entirely.
     std::atomic<int> grHistoryWritePos { 0 };
-    bool characterMode = false;  // true = CHARACTER (warmth+transformer+presence), false = CLEAN
 
 private:
     // Every follower and filter below is pure IIR state: once it holds a NaN or
@@ -609,21 +544,8 @@ private:
     float detLowCoeff = 0.0f;
     float detLowCutGain = 0.29f;
 
-    // Harmonic warmth DC blocker
-    float warmDcPrevInL = 0.0f, warmDcPrevInR = 0.0f;
-    float warmDcPrevOutL = 0.0f, warmDcPrevOutR = 0.0f;
-    float warmDcCoeff = 0.9995f;
 
-    // Transformer coloration (character mode)
-    float xfmrLpL = 0.0f, xfmrLpR = 0.0f;          // LP at ~16kHz
-    float xfmrLpCoeff = 0.0f;
-    float xfmrHpPrevInL = 0.0f, xfmrHpPrevInR = 0.0f;  // HP at ~25Hz
-    float xfmrHpPrevOutL = 0.0f, xfmrHpPrevOutR = 0.0f;
-    float xfmrHpCoeff = 0.0f;
 
-    // Vocal presence shelf (character mode)
-    float presLpL = 0.0f, presLpR = 0.0f;
-    float presLpCoeff = 0.0f;  // LP at ~3kHz for presence extraction
 
     // Sidechain HPF (detector only, 2nd order Butterworth biquad)
     float scHpfFreq = 0.0f;  // 0 = off

@@ -54,7 +54,6 @@ public:
     // True when output exceeds 0dBFS
     std::atomic<bool> outputClipping { false };
     std::atomic<bool> inputClipping { false };
-    std::atomic<bool> deltaMode { false };
     std::atomic<bool> deClickMode { false };
     std::atomic<bool> rideMode { false };           // auto-leveling ride
     std::atomic<float> rideOffsetComp { 0.0f };     // offset in comp units (0-36) for editor display

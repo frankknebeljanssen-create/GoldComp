@@ -106,12 +106,7 @@ public:
     TooltipInfo getTooltipFor(const juce::String& element);
 
     // A/B comparison
-    bool abState = false;
-    juce::Rectangle<int> abBtnRect, deltaBtnRect, rideRect;
-    struct ABSlot { float comp=0, gate=-80, gain=0, hpf=0, mix=100, clip=0, inTrim=0, schpf=0; };
-    ABSlot slotA, slotB;
-    void storeCurrentToSlot(ABSlot& slot);
-    void loadSlotToCurrent(const ABSlot& slot);
+    juce::Rectangle<int> rideRect;
 
     // ADV panel
     bool advOpen = false;

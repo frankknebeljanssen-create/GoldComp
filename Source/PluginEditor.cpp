@@ -201,9 +201,6 @@ void GoldCompEditor::GoldCompLookAndFeel::drawRotarySlider(
         // Both are bipolar trims, so the sign has to be visible
         juce::String txt = (fval > 0.05f ? "+" : "") + juce::String(fval, 1);
         g.drawText(txt, x, y, width, height, juce::Justification::centred);
-    } else if (name == "Attack") {
-        juce::String txt = fval < 1.0f ? juce::String(fval, 2) : juce::String(fval, 1);
-        g.drawText(txt, x, y, width, height, juce::Justification::centred);
     } else {
         g.drawText(juce::String(val), x, y, width, height, juce::Justification::centred);
     }
@@ -441,8 +438,6 @@ void GoldCompEditor::timerCallback()
             else if (gateSlider.isVisible() && gateSlider.getBounds().contains(p)) hoveredElement = "gate";
             else if (scHpfSlider.isVisible() && scHpfSlider.getBounds().contains(p)) hoveredElement = "schpf";
             else if (honestBtnRect.contains(bp)) hoveredElement = "true";
-            else if (abBtnRect.contains(bp)) hoveredElement = "ab";
-            else if (deltaBtnRect.contains(bp)) hoveredElement = "delta";
             else if (rideRect.contains(bp)) hoveredElement = "ride";
             else if (saveBtnRect.contains(bp)) hoveredElement = "save";
             else if (loadBtnRect.contains(bp)) hoveredElement = "load";
@@ -491,25 +486,6 @@ void GoldCompEditor::mouseDown(const juce::MouseEvent& e)
     }
 
     // A/B switch
-    if (abBtnRect.contains(bp)) {
-        if (!abState) {
-            storeCurrentToSlot(slotA);
-            loadSlotToCurrent(slotB);
-        } else {
-            storeCurrentToSlot(slotB);
-            loadSlotToCurrent(slotA);
-        }
-        abState = !abState;
-        repaint(); return;
-    }
-
-    // Delta mode toggle
-    if (deltaBtnRect.contains(bp)) {
-        bool cur = processor.deltaMode.load();
-        processor.deltaMode.store(!cur);
-        repaint(); return;
-    }
-
     // ADV panel toggle
     if (advToggleRect.contains(bp)) {
         advOpen = !advOpen;
@@ -603,7 +579,7 @@ void GoldCompEditor::recalcLayout()
     L.tlH = 155;
     L.tlW = L.w - 32;
     L.panelY = L.tlY + L.tlH + 12;
-    L.panelH = 140;  // Delta/AB stacked left, knobs right — no extra row
+    L.panelH = 140;
     L.barW = 200;
     L.barX = L.contentCx - L.barW / 2 - 30;
     L.readoutX = L.w - 16 - 10 - 46;
@@ -989,9 +965,6 @@ void GoldCompEditor::paint(juce::Graphics& g)
         g.setColour(advOpen ? C::accent : C::label);
         g.drawText("ADV", advToggleRect, juce::Justification::centred);
 
-        // Delta and AB rects hidden (moved to ADV panel) — set empty for hit tests
-        deltaBtnRect = {};
-        abBtnRect = {};
     }
 
     // CLIP + DE-CLICK buttons — right side, stacked
@@ -1089,35 +1062,9 @@ void GoldCompEditor::paint(juce::Graphics& g)
         int knobTopY = presetBottom + (availH - knobBlockH) / 2 + 6;
         int knobCenterY = knobTopY + knobSzAdv / 2;
 
-        // Delta + A/B pills — vertical stack, left side, centered with knobs
-        {
-            bool isDelta = processor.deltaMode.load();
-            int daPillW = 55, daPillH = 24, daPillGap = 4;  // 20% bigger
-            int daX = panelInnerX;
-            int daTotalH = daPillH * 2 + daPillGap;
-            int daY = knobCenterY - daTotalH / 2;
-
-            deltaBtnRect = juce::Rectangle<int>(daX, daY, daPillW, daPillH);
-            g.setColour(isDelta ? C::clipCol.withAlpha(0.2f) : juce::Colour(0xff1e2330));
-            g.fillRoundedRectangle(deltaBtnRect.toFloat(), 5.0f);
-            g.setColour(isDelta ? C::clipCol.withAlpha(0.6f) : juce::Colour(0xff444a58));
-            g.drawRoundedRectangle(deltaBtnRect.toFloat(), 5.0f, 1.0f);
-            g.setFont(juce::Font("Arial", 11.0f, juce::Font::bold));
-            g.setColour(isDelta ? C::clipCol : C::white);
-            g.drawText(juce::CharPointer_UTF8("\xce\x94"), deltaBtnRect, juce::Justification::centred);
-
-            abBtnRect = juce::Rectangle<int>(daX, daY + daPillH + daPillGap, daPillW, daPillH);
-            g.setColour(abState ? C::accent.withAlpha(0.2f) : juce::Colour(0xff1e2330));
-            g.fillRoundedRectangle(abBtnRect.toFloat(), 5.0f);
-            g.setColour(abState ? C::accent.withAlpha(0.6f) : juce::Colour(0xff444a58));
-            g.drawRoundedRectangle(abBtnRect.toFloat(), 5.0f, 1.0f);
-            g.setFont(juce::Font("Arial", 11.0f, juce::Font::bold));
-            g.setColour(abState ? C::accent : C::white);
-            g.drawText(abState ? "B" : "A", abBtnRect, juce::Justification::centred);
-        }
-
-        // Knob labels + knobs — right of Delta/AB
-        int knobAreaLeft = panelInnerX + 66;  // after wider Delta/AB
+        // Knob labels + knobs. The left 66px used to hold the Delta and A/B
+        // pills; with those gone the knobs use the full panel width.
+        int knobAreaLeft = panelInnerX + 8;
         int knobAreaRight = panelInnerX + panelInnerW;
         int knobAreaW2 = knobAreaRight - knobAreaLeft;
         int col3W = knobAreaW2 / 3;
@@ -1202,8 +1149,6 @@ void GoldCompEditor::paint(juce::Graphics& g)
             else if (hoveredElement == "intrim") elBounds = unscaleRect(inTrimSlider.getBounds());
             else if (hoveredElement == "schpf") elBounds = unscaleRect(scHpfSlider.getBounds());
             else if (hoveredElement == "true") elBounds = honestBtnRect;
-            else if (hoveredElement == "ab") elBounds = abBtnRect;
-            else if (hoveredElement == "delta") elBounds = deltaBtnRect;
             else if (hoveredElement == "ride") elBounds = rideRect;
             else if (hoveredElement == "save") elBounds = saveBtnRect;
             else if (hoveredElement == "load") elBounds = loadBtnRect;
@@ -1266,13 +1211,10 @@ void GoldCompEditor::paint(juce::Graphics& g)
             g.drawText(text, r, juce::Justification::centred);
         };
 
-        bool isDelta = processor.deltaMode.load();
         bool clipOn2 = processor.apvts.getRawParameterValue("clip")->load() > 1.0f;
         bool dcOn2 = processor.deClickMode.load();
 
         // Left pills
-        drawPill(deltaBtnRect, juce::CharPointer_UTF8("\xce\x94"), isDelta, C::clipCol);
-        drawPill(abBtnRect, abState ? "B" : "A", abState, C::accent);
         drawPill(advToggleRect, "ADV", advOpen, C::accent);
 
         // Right pills
@@ -1988,7 +1930,7 @@ void GoldCompEditor::resized()
         int advKnobSz = 56;
         int panelX = 24;
         int advPanelW = L.w - 48;
-        int knobAreaLeft = panelX + 66;
+        int knobAreaLeft = panelX + 8;
         int knobAreaRight = panelX + advPanelW;
         int knobAreaW2 = knobAreaRight - knobAreaLeft;
         int col3W = knobAreaW2 / 3;
@@ -2015,28 +1957,6 @@ void GoldCompEditor::resized()
 }
 
 // ============== A/B COMPARISON ==============
-void GoldCompEditor::storeCurrentToSlot(ABSlot& slot)
-{
-    slot.comp = processor.apvts.getRawParameterValue("comp")->load();
-    slot.gate = processor.apvts.getRawParameterValue("gate")->load();
-    slot.gain = processor.apvts.getRawParameterValue("gain")->load();
-    slot.hpf = processor.apvts.getRawParameterValue("hpf")->load();
-    slot.mix = processor.apvts.getRawParameterValue("mix")->load();
-    slot.clip = processor.apvts.getRawParameterValue("clip")->load();
-    slot.inTrim = processor.apvts.getRawParameterValue("inTrim")->load();
-    slot.schpf = processor.apvts.getRawParameterValue("schpf")->load();
-}
-
-void GoldCompEditor::loadSlotToCurrent(const ABSlot& slot)
-{
-    auto set = [&](const juce::String& id, float v) {
-        processor.apvts.getParameter(id)->setValueNotifyingHost(processor.apvts.getParameterRange(id).convertTo0to1(v));
-    };
-    set("comp", slot.comp); set("gate", slot.gate); set("gain", slot.gain);
-    set("hpf", slot.hpf); set("mix", slot.mix); set("clip", slot.clip);
-    set("inTrim", slot.inTrim); set("schpf", slot.schpf);
-}
-
 // ============== TOOLTIP INFO ==============
 GoldCompEditor::TooltipInfo GoldCompEditor::getTooltipFor(const juce::String& el)
 {
@@ -2119,22 +2039,6 @@ GoldCompEditor::TooltipInfo GoldCompEditor::getTooltipFor(const juce::String& el
         "ITU-R BS.1770 K-weighted LUFS | 300ms smoothing window\n"
         "Slew limit: 1 dB/50ms | Safety clamp: +6 dB max boost\n"
         "Measurement point: pre-match (no feedback loop)"
-    };
-    if (el == "delta") return {
-        "Delta Listen",
-        "Outputs only what the compressor removes from the signal. "
-        "Computed per-sample inside the compressor: delayed signal "
-        "multiplied by (1 minus gain). Useful for checking whether "
-        "tonal content is being compressed unnecessarily.",
-        "Output = delayed input × (1 - compressor gain)\n"
-        "Sample-accurate delta extraction\n"
-        "Bypasses makeup, limiter, mix — pure compression residual"
-    };
-    if (el == "ab") return {
-        "A/B Compare",
-        "Stores two independent parameter states. "
-        "Current settings are preserved when switching slots.",
-        "Click to toggle between slot A and B"
     };
     if (el == "ride") return {
         "AUTO Mode",
