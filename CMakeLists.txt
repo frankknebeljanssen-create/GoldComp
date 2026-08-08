@@ -47,3 +47,18 @@ target_link_libraries(GoldComp
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags)
+
+# Measurement harness for the DSP classes — lets us put real numbers on
+# limiter overshoot, transient response and timing instead of guessing.
+juce_add_console_app(dsp_bench PRODUCT_NAME "dsp_bench")
+target_sources(dsp_bench PRIVATE tests/dsp_bench.cpp)
+target_compile_definitions(dsp_bench PUBLIC
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JUCE_STANDALONE_APPLICATION=1)
+target_link_libraries(dsp_bench
+    PRIVATE
+        juce::juce_audio_utils
+        juce::juce_dsp
+    PUBLIC
+        juce::juce_recommended_config_flags)
