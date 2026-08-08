@@ -20,8 +20,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout GoldCompProcessor::createPar
         juce::ParameterID("comp", 1), "Compression",
         juce::NormalisableRange<float>(0.0f, 36.0f, 0.1f), 0.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("gain", 1), "Gain",
-        juce::NormalisableRange<float>(-36.0f, 0.0f, 0.1f), 0.0f));
+        juce::ParameterID("gain", 1), "Out Gain",
+        juce::NormalisableRange<float>(-24.0f, 12.0f, 0.1f), 0.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("hpf", 1), "HP Filter",
         juce::NormalisableRange<float>(0.0f, 300.0f, 1.0f, 0.4f), 0.0f));
@@ -99,6 +99,23 @@ void GoldCompProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     dryDelayL.assign(delaySize, 0.0f);
     dryDelayR.assign(delaySize, 0.0f);
     dryDelayWritePos = 0;
+
+    // Force the signal HPF to redesign its coefficients. Without this the knob
+    // deadband below keeps the *previous* sample rate's coefficients, so after a
+    // rate change a 300 Hz setting actually sits at 653 Hz (44.1k -> 96k) until
+    // the user happens to nudge the knob.
+    lastHpfFreq = -1.0f;
+
+    // Ramp and filter state: initialised at construction but previously never
+    // re-initialised here, so a re-prepare replayed stale gain and DC state.
+    prevTrimLin = 1.0f;
+    prevMakeupLin = 1.0f;
+    prevOffsetLin = 1.0f;
+    prevMixWet = 1.0f;
+    prevOutTrimLin = 1.0f;
+    smoothedMakeupGR = 0.0f;
+    dcBlockL = dcBlockR = dcPrevInL = dcPrevInR = 0.0f;
+    prevBypassed = false;
 
     smoothedInLUFS = 0.0f;
     smoothedOutLUFS = 0.0f;
@@ -222,7 +239,12 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     float compDB   = -apvts.getRawParameterValue("comp")->load(); // param is 0-36, negate for processing
     // Remap: knob 0-36 → internal 0-29 (sweet spot at 29 is max effective compression)
     compDB = compDB * (29.0f / 36.0f);
-    float gainDB   = apvts.getRawParameterValue("gain")->load();
+    // Out Gain is a true output level now, not the limiter ceiling. Using it as
+    // the ceiling meant turning it down made the signal quieter *and* flatter
+    // (12.8 dB of limiting at 0, 24.8 dB at -12), so there was no way out of
+    // permanent limiting. The ceiling is fixed just below full scale instead.
+    float outTrimDB = apvts.getRawParameterValue("gain")->load();
+    static constexpr float CEILING_DB = -0.3f;
     float hpfFreq  = apvts.getRawParameterValue("hpf")->load();
     float scHpFreq = apvts.getRawParameterValue("schpf")->load();
     float mixAmt   = apvts.getRawParameterValue("mix")->load() / 100.0f;
@@ -547,18 +569,24 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
         {
             // === NORMAL OUTPUT PATH ===
 
-            // 4. Makeup gain — linear with gentle taper above 18dB
-            // Full range compression: keeps getting louder all the way to 36
-            float rawMakeup = -compDB;  // 0 to 36
-            float makeupDB;
-            if (rawMakeup <= 18.0f) {
-                makeupDB = rawMakeup * 1.15f;  // linear region: 0→20.7dB
-            } else {
-                // Gentle taper: pow(0.75) above 18dB — still rises meaningfully
-                float excess = rawMakeup - 18.0f;  // 0→18
-                makeupDB = 18.0f * 1.15f + std::pow(excess / 18.0f, 0.75f) * 18.0f * 1.0f;
-                // At 18dB: 20.7dB. At 36dB: 20.7 + 18.0 = 38.7dB
-            }
+            // 4. Makeup gain — follows the gain reduction actually delivered.
+            //
+            // This used to be derived from the knob position instead, which did
+            // not match what the compressor was doing: at Comp 8 the detector
+            // produced 0 dB of reduction while makeup added +7.4 dB, so the
+            // limiter downstream was already working, and from Comp 12 up it sat
+            // in continuous double-digit reduction. That is what made the plugin
+            // sound loud and flat regardless of setting.
+            //
+            // The averaging window matters: following GR instantly would cancel
+            // the compression exactly. At ~500 ms it restores level while the
+            // dynamics stay compressed. Makeup is applied after the compressor,
+            // so it never feeds back into the detector.
+            float makeupSmooth = std::exp(-(float)numSamples / (float)(currentSampleRate * 0.500));
+            smoothedMakeupGR = smoothedMakeupGR * makeupSmooth
+                             + compressor.getGainReductionDB() * (1.0f - makeupSmooth);
+            if (! std::isfinite(smoothedMakeupGR)) smoothedMakeupGR = 0.0f;
+            float makeupDB = juce::jlimit(0.0f, 24.0f, smoothedMakeupGR);
             float makeupLin = std::pow(10.0f, makeupDB / 20.0f);
             {
                 float mkDelta = (makeupLin - prevMakeupLin) / (float)numSamples;
@@ -572,12 +600,12 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
             prevMakeupLin = makeupLin;
 
             // 5. Limiter
-            limiter.process(left, right, numSamples, gainDB);
+            limiter.process(left, right, numSamples, CEILING_DB);
 
             // 5b. Safety soft-clip — multi-stage soft knee, more transparent than single tanh
             // Starts gently at 75% ceiling, full limiting at 100%
             {
-                float ceiling = std::pow(10.0f, gainDB / 20.0f);
+                float ceiling = std::pow(10.0f, CEILING_DB / 20.0f);
                 float knee = ceiling * 0.25f;       // 25% knee width
                 float kneeStart = ceiling - knee;   // starts at 75% ceiling
                 for (int i = 0; i < numSamples; ++i) {
@@ -701,7 +729,7 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
 
                 // Safety: soft-clip after HONEST to prevent distortion from boosting
                 if (offsetLin > 1.01f) {
-                    float ceil = std::pow(10.0f, gainDB / 20.0f);
+                    float ceil = std::pow(10.0f, CEILING_DB / 20.0f);
                     float ct = ceil * 0.92f;
                     for (int i = 0; i < numSamples; ++i) {
                         for (float* ch : { &left[i], &right[i] }) {
@@ -737,6 +765,22 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
                 }
             }
             prevMixWet = mixAmt;
+
+            // 10. Out Gain — a true output level, applied to the finished mix so
+            // it cannot shift the dry/wet balance, and per-sample ramped so
+            // automating it does not zipper. Placed after everything: it sets
+            // level without changing how hard anything upstream works.
+            {
+                float outTrimLin = std::pow(10.0f, outTrimDB / 20.0f);
+                float trimDelta = (outTrimLin - prevOutTrimLin) / (float)numSamples;
+                float curTrim = prevOutTrimLin;
+                for (int i = 0; i < numSamples; ++i) {
+                    curTrim += trimDelta;
+                    left[i] *= curTrim;
+                    right[i] *= curTrim;
+                }
+                prevOutTrimLin = outTrimLin;
+            }
         }
     }
     else

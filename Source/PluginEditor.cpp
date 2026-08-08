@@ -197,7 +197,8 @@ void GoldCompEditor::GoldCompLookAndFeel::drawRotarySlider(
         g.drawText(val < 1 ? "OFF" : juce::String(val), x, y, width, height, juce::Justification::centred);
     } else if (name == "Gate") {
         g.drawText(val <= -79 ? "OFF" : juce::String(val), x, y, width, height, juce::Justification::centred);
-    } else if (name == "In Trim") {
+    } else if (name == "In Trim" || name == "Gain") {
+        // Both are bipolar trims, so the sign has to be visible
         juce::String txt = (fval > 0.05f ? "+" : "") + juce::String(fval, 1);
         g.drawText(txt, x, y, width, height, juce::Justification::centred);
     } else if (name == "Attack") {

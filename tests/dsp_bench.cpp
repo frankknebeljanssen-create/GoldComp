@@ -165,6 +165,94 @@ void benchCompressorTiming()
 }
 
 //==============================================================================
+// Gain staging: how hard is the limiter working at each knob position?
+//
+// Makeup used to be derived from the knob rather than from the reduction the
+// compressor actually delivered, which pushed the limiter into continuous
+// double-digit reduction from Comp 12 up. This replicates the real chain —
+// compressor at 2x, makeup, limiter at base rate — for both makeup laws.
+void benchGainStaging()
+{
+    const int   blockSize = 512;
+    const int   blocks    = 220;                 // ~2.5 s, long enough for the
+    const float ceilingDB = -0.3f;               // 500 ms makeup average to settle
+    const int   knobs[]   = { 4, 8, 12, 20, 28, 36 };
+
+    std::printf ("GAIN STAGING  vocal-like input at -18 dBFS RMS, ceiling %.1f dBFS\n", ceilingDB);
+    std::printf ("  %-5s  %-22s  %-22s\n", "knob", "makeup from knob (old)", "makeup from GR (new)");
+    std::printf ("  %-5s  %-10s %-11s  %-10s %-11s\n", "", "makeup", "limiter GR", "makeup", "limiter GR");
+
+    for (int knob : knobs)
+    {
+        double results[2][2];
+        for (int law = 0; law < 2; ++law)
+        {
+            RVoxCompressor comp;
+            LookaheadLimiter lim;
+            comp.prepare (SR, blockSize);
+            comp.userKneeWidth = 6.0f;
+            comp.maxGainReductionDB = 36.0f;
+            comp.setAttackTime (0.0001f);
+            lim.prepare (SR, blockSize);
+
+            const float compDB = -(float) knob * (29.0f / 36.0f);   // as PluginProcessor maps it
+            double makeupGRAvg = 0.0, makeupSum = 0.0, limGRSum = 0.0;
+            int counted = 0;
+
+            std::vector<float> osL ((size_t) blockSize * 2), osR ((size_t) blockSize * 2);
+            std::vector<float> bL ((size_t) blockSize), bR ((size_t) blockSize);
+
+            for (int b = 0; b < blocks; ++b)
+            {
+                // syllable-like envelope so crest factor is realistic
+                for (int i = 0; i < blockSize * 2; ++i) {
+                    double t = (b * blockSize * 2 + i) / (SR * 2.0);
+                    double env = 0.35 + 0.65 * std::pow (std::abs (std::sin (2.0 * M_PI * 2.5 * t)), 2.0);
+                    double s = std::sin (2.0 * M_PI * 220.0 * t) * 0.7
+                             + std::sin (2.0 * M_PI * 1400.0 * t) * 0.3;
+                    osL[(size_t) i] = osR[(size_t) i] = (float) (lin (-15.0) * env * s);
+                }
+
+                comp.process (osL.data(), osR.data(), blockSize * 2, compDB, -80.0f, 0);
+
+                // naive decimate — good enough for level bookkeeping
+                for (int i = 0; i < blockSize; ++i) {
+                    bL[(size_t) i] = osL[(size_t) (i * 2)];
+                    bR[(size_t) i] = osR[(size_t) (i * 2)];
+                }
+
+                float makeupDB;
+                if (law == 0) {
+                    float rawMakeup = -compDB;
+                    makeupDB = rawMakeup <= 18.0f
+                             ? rawMakeup * 1.15f
+                             : 18.0f * 1.15f + std::pow ((rawMakeup - 18.0f) / 18.0f, 0.75f) * 18.0f;
+                } else {
+                    double sm = std::exp (-(double) blockSize / (SR * 0.500));
+                    makeupGRAvg = makeupGRAvg * sm + comp.getGainReductionDB() * (1.0 - sm);
+                    makeupDB = (float) std::max (0.0, std::min (24.0, makeupGRAvg));
+                }
+                float mk = std::pow (10.0f, makeupDB / 20.0f);
+                for (int i = 0; i < blockSize; ++i) { bL[(size_t) i] *= mk; bR[(size_t) i] *= mk; }
+
+                lim.process (bL.data(), bR.data(), blockSize, ceilingDB);
+
+                if (b > blocks / 2) {                 // settled half only
+                    makeupSum += makeupDB;
+                    limGRSum  += lim.getGainReductionDB();
+                    ++counted;
+                }
+            }
+            results[law][0] = makeupSum / counted;
+            results[law][1] = limGRSum / counted;
+        }
+        std::printf ("  %-5d  %+8.2f dB %8.2f dB   %+8.2f dB %8.2f dB\n",
+                     knob, results[0][0], results[0][1], results[1][0], results[1][1]);
+    }
+    std::printf ("  Limiter GR should stay low — it is a safety net, not the main gain stage.\n\n");
+}
+
+//==============================================================================
 // The sliding minimum replaces the per-sample window scan in both lookahead
 // stages, so it has to agree with brute force on every sample or it will
 // introduce gain errors that are very hard to hear out.
@@ -228,6 +316,7 @@ int main()
     std::printf ("\n=== GoldComp DSP bench @ %.0f Hz ===\n\n", SR);
     if (! testSlidingMinimum())
         return 1;
+    benchGainStaging();
     benchLimiter();
     benchCompressorTransient();
     benchCompressorTiming();

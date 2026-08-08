@@ -105,6 +105,8 @@ private:
     float prevMakeupLin = 1.0f;
     float prevOffsetLin = 1.0f;
     float prevMixWet = 1.0f;
+    float prevOutTrimLin = 1.0f;
+    float smoothedMakeupGR = 0.0f;   // slow average of delivered GR, drives makeup
 
     // K-weighted loudness (LUFS) for gain match
     // Stage 1: high-shelf +4dB @ 1681Hz (pre-filter)
