@@ -87,6 +87,16 @@ cmake --build ~/Library/Caches/SmartComp-build --target dsp_bench
 ~/Library/Caches/SmartComp-build/dsp_bench_artefacts/Release/dsp_bench
 ```
 
+The README screenshot is generated the same way rather than mocked up:
+`tests/ui_shot.cpp` runs the real processor and editor through a genuine JUCE
+event loop against a synthetic vocal-like signal, then saves what actually
+renders.
+
+```bash
+cmake --build ~/Library/Caches/SmartComp-build --target ui_shot
+open ~/Library/Caches/SmartComp-build/ui_shot_artefacts/Release/ui_shot.app --args /tmp/screenshot.png
+```
+
 ## License
 
 Not yet decided. The repository is public for now; no license has been

@@ -62,3 +62,23 @@ target_link_libraries(dsp_bench
         juce::juce_dsp
     PUBLIC
         juce::juce_recommended_config_flags)
+
+# README screenshot generator. Runs the real processor and editor through a
+# genuine JUCE event loop against synthetic audio (see tests/ui_shot.cpp for
+# why), then saves a PNG. Links against the SmartComp shared-code target
+# rather than recompiling PluginProcessor/PluginEditor, so it inherits the
+# JucePlugin_* compile definitions juce_add_plugin generates for it — those
+# headers use JucePlugin_Name, and recompiling them in a fresh target without
+# juce_add_plugin's generated definitions would need reproducing that by hand.
+juce_add_gui_app(ui_shot PRODUCT_NAME "ui_shot")
+target_sources(ui_shot PRIVATE tests/ui_shot.cpp)
+target_compile_definitions(ui_shot PUBLIC
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0)
+target_link_libraries(ui_shot
+    PRIVATE
+        SmartComp
+        juce::juce_audio_utils
+        juce::juce_dsp
+    PUBLIC
+        juce::juce_recommended_config_flags)
