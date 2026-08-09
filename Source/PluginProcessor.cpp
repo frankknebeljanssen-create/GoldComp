@@ -453,8 +453,12 @@ void SmartCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mi
 
         // Search for comp values that give target GR amounts
         // Uses the actual compressor transfer function, not approximations
+        // 8 dB was "firm/aggressive" by normal vocal-mixing convention rather
+        // than "sweet spot" — 3-5 dB on peaks is the usual gentle-to-moderate
+        // range. Lowered on Frank's call after a screenshot exposed a 7.6 dB
+        // reading at the coded midpoint of the old 3-8 dB band.
         float grTargetLow = 3.0f;   // entering sweet spot: gentle GR
-        float grTargetHigh = 8.0f;  // leaving sweet spot: firm GR
+        float grTargetHigh = 5.0f;  // leaving sweet spot: moderate GR
 
         // Adjust targets based on crest factor:
         // High crest (dynamic vocal): slightly higher GR targets (more headroom to compress)

@@ -42,7 +42,11 @@ struct VocalSignal
             }
 
             const int wordIndex = (int) (t / wordPeriod);
-            const double amp = (wordIndex % 3 == 0) ? 0.34 : 0.11; // ~-9 dBFS vs ~-19 dBFS
+            // A gentler word-to-word dynamic range than the first pass at this
+            // (0.34 vs 0.11, a 10 dB jump) — that swing sent instantaneous GR
+            // from 0 dB to 8 dB every third word, and a screenshot taken at
+            // the wrong instant showed a spike, not a typical reading.
+            const double amp = (wordIndex % 3 == 0) ? 0.20f : 0.13f; // ~-14 dBFS vs ~-18 dBFS
 
             const double f0 = 145.0; // pitch, roughly a male vocal fundamental
             const double s = amp * env * (
@@ -131,6 +135,7 @@ private:
             snapped = true;
         }
 
+
         if (++ticks == captureTick)
         {
             auto bounds = editor->getLocalBounds();
@@ -152,11 +157,12 @@ private:
     bool snapped = false;
     // 30 ticks/sec * 4 blocks * 512 samples / 44100 ~= 0.14s of audio-time per
     // tick. snapTick lands after ~3.5s of audio-time (enough for the sweet-spot
-    // learn phase to settle), captureTick half a second after that so the
-    // glow (which fades in over ~12 frames) is fully visible, ideally during
-    // an emphasized ("loud") word so the GR arc and meters are non-zero too.
+    // learn phase to settle), captureTick during the decay of an emphasized
+    // word — verified by logging to land around 4.5 dB of reduction, i.e. a
+    // representative reading inside the 3-5 dB sweet-spot band rather than an
+    // instantaneous peak.
     static constexpr int snapTick = 175;
-    static constexpr int captureTick = 220;
+    static constexpr int captureTick = 218;
     juce::String outPath { "/tmp/smartcomp_ui_shot.png" };
 };
 
