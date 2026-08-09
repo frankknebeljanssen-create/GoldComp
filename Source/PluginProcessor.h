@@ -49,13 +49,15 @@ public:
     std::atomic<bool> gainMatchEnabled { false };
     std::atomic<bool> honestMode { false };  // Auto loudness match — hear only character, not volume
 
-    // Clip activity: 0-1 how hard the clipper is saturating
-    std::atomic<float> clipActivity { 0.0f };
     // True when output exceeds 0dBFS
     std::atomic<bool> outputClipping { false };
     std::atomic<bool> inputClipping { false };
     std::atomic<bool> rideMode { false };           // auto-leveling ride
-    std::atomic<float> rideOffsetComp { 0.0f };     // offset in comp units (0-36) for editor display
+    // Absolute knob-units (0-36) target AUTO is smoothing the "comp" parameter
+    // toward — not an offset. The editor pushes the real parameter at this value
+    // each frame (when the user isn't actively dragging), so the knob you see is
+    // always the value actually driving the compressor, not a separate display.
+    std::atomic<float> rideTargetComp { 0.0f };
 
     // Signal analysis for Sweet Spot / Confidence features
     std::atomic<float> inputDynamicRange { 0.0f };   // smoothed crest factor (dB)
@@ -67,8 +69,6 @@ public:
     float smoothedPeakDB = -60.0f;   // smoothed peak level (internal)
     float smoothedRMSDB = -60.0f;    // smoothed RMS level (internal)
     float smoothedCrestDB = 12.0f;   // smoothed crest factor (internal)
-
-    // (oversamplers removed — only clipper OS remains)
 
     // Public for GR timeline access
     RVoxCompressor compressor;
@@ -84,16 +84,13 @@ private:
     float lastHpfFreq = -1.0f;
 
     // JUCE's second ctor argument is an exponent: 2^n times oversampling.
-    juce::dsp::Oversampling<float> oversampler { 2, 2, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true };  // 4x for clipper
     juce::dsp::Oversampling<float> compOS { 2, 1, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true };     // 2x for compressor
     static constexpr int compOSFactor = 2;   // must match compOS above
 
-    static float softClipNormalized(float sample, float amount,
-                                    float drive, float slopeNorm);
     static void setHighPassCoefficients(juce::dsp::IIR::Coefficients<float>& c,
                                         double sampleRate, float freq);
 
-    // DC blocker after asymmetric clipper
+    // DC blocker
     float dcBlockL = 0.0f, dcBlockR = 0.0f;
     float dcPrevInL = 0.0f, dcPrevInR = 0.0f;
     float dcBlockCoeff = 0.9995f; // computed from SR in prepareToPlay
@@ -121,7 +118,6 @@ private:
     float prevOutTrimLin = 1.0f;
     float smoothedMakeupGR = 0.0f;   // slow average of delivered GR, drives makeup
     float smoothedHpfFreq = 0.0f;    // anti-zipper for the HPF coefficient swap
-    float smoothedClipAmt = 0.0f;    // anti-zipper for the clipper drive/blend
 
     // K-weighted loudness (LUFS) for gain match
     // Stage 1: high-shelf +4dB @ 1681Hz (pre-filter)
@@ -143,13 +139,11 @@ private:
     float applyBiquad(float x, BiquadState& s, const BiquadCoeffs& c);
 
 
-    // RIDE: auto-leveling — slow RMS tracker that adjusts comp offset
-    float rideEnvDB = -60.0f;           // slow RMS envelope (~3 sec)
-    float rideRefDB = -60.0f;           // reference level (first measured input)
-    bool rideRefSet = false;            // has reference been captured
-    float rideSmoothedOffset = 0.0f;    // smoothed output offset in comp units
-    float rideEnvCoeff = 0.0f;          // ~3 sec time constant
-    float rideOffsetSmoothCoeff = 0.0f; // ~0.5 sec for smooth knob movement
+    // AUTO: smoothed absolute knob target, follows the sweet-spot midpoint.
+    // rideEnvDB/rideRefDB/rideRefSet/rideEnvCoeff/rideOffsetSmoothCoeff used to
+    // live here too — initialised every prepare, read nowhere.
+    float rideSmoothedComp = 0.0f;      // smoothed absolute comp value in knob units
+    bool  rideSmoothedInit = false;     // false until the first AUTO frame seeds it
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SmartCompProcessor)
 };

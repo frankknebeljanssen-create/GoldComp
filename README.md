@@ -12,10 +12,12 @@ nothing while a hot take slams. SmartComp's threshold tracks a slow average of
 the incoming level instead, so a given knob position delivers roughly the same
 amount of gain reduction whether the track came in at −30 dBFS or −15 dBFS.
 
-**RIDE mode** goes a step further: it watches where the sweet spot currently
-sits and follows it automatically as the performance changes — a quiet verse
-and a loud chorus each get compressed appropriately without you touching the
-knob.
+**AUTO mode** goes a step further: it watches where the sweet spot currently
+sits and drives the knob there directly, following it as the performance
+changes — a quiet verse and a loud chorus each get compressed appropriately
+without you touching the knob. Drag the knob away while AUTO is on and it
+springs back the moment you let go, like a rubber band anchored to the sweet
+spot.
 
 The rest of the design follows the same idea: one main knob, sane defaults,
 nothing to configure before it sounds right.
@@ -24,8 +26,7 @@ nothing to configure before it sounds right.
 
 ```
 In Trim → HP Filter → Compressor (auto-threshold, 2x oversampled) → Makeup
-   → Soft Clipper (4x oversampled) → HONEST loudness match → Limiter
-   → Dry/Wet Mix → Out Gain
+   → HONEST loudness match → Limiter → Dry/Wet Mix → Out Gain
 ```
 
 Gain staging is derived, not manual: makeup gain follows the compression
@@ -38,10 +39,10 @@ Compression knob it holds at 0 dB of reduction on typical vocal material.
 | Parameter | Range | What it does |
 |---|---|---|
 | **Compression** | 0–36 | The main knob. Auto-tracking threshold + ratio. |
+| **AUTO** | on/off | Drives the knob to the sweet spot and keeps following it. |
 | **Gate** | −80 to −20 dB | Noise gate, off at minimum. |
 | **HP Filter** | 0–300 Hz | High-pass on the output signal. |
 | **SC HP Filter** | 0–400 Hz | High-pass on the detector only — keeps bass from pumping the gain reduction. |
-| **Soft Clip** | 0–100% | Harmonic saturation, transparent at low settings. |
 | **Mix** | 0–100% | Parallel compression blend, latency-compensated. |
 | **In Trim** | ±12 dB | Input gain, before the detector. |
 | **Out Gain** | −24 to +12 dB | True output level (not the limiter ceiling). |
@@ -85,6 +86,16 @@ alone:
 ```bash
 cmake --build ~/Library/Caches/SmartComp-build --target dsp_bench
 ~/Library/Caches/SmartComp-build/dsp_bench_artefacts/Release/dsp_bench
+```
+
+`tests/auto_probe.cpp` is a behavioural regression test for AUTO mode — it
+drives the real processor headlessly and checks that the Compression knob
+converges on the sweet spot, springs back after being dragged away while AUTO
+is on, and recovers fully after being parked in the red with AUTO off:
+
+```bash
+cmake --build ~/Library/Caches/SmartComp-build --target auto_probe
+~/Library/Caches/SmartComp-build/auto_probe_artefacts/Release/auto_probe
 ```
 
 The README screenshot is generated the same way rather than mocked up:

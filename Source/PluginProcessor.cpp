@@ -20,7 +20,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout SmartCompProcessor::createPa
     // relSlowMs, kneeW, grRange, oversample, ratioMult, transProtect — none of
     // which were ever read: processBlock hardcoded their effects. They still
     // showed up in the host's automation list and got saved into sessions, so a
-    // user could automate a control that did nothing.
+    // user could automate a control that did nothing. "clip" went later: the
+    // saturation was too subtle to justify a control, and a dedicated limiter
+    // plugin (SmartLim) covers that territory properly.
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID("bypass", 1), "Bypass", false));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
@@ -35,9 +37,6 @@ juce::AudioProcessorValueTreeState::ParameterLayout SmartCompProcessor::createPa
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("schpf", 1), "SC HP Filter",
         juce::NormalisableRange<float>(0.0f, 400.0f, 1.0f, 0.4f), 0.0f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("clip", 1), "Soft Clip",
-        juce::NormalisableRange<float>(0.0f, 100.0f, 1.0f), 0.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("mix", 1), "Mix",
         juce::NormalisableRange<float>(0.0f, 100.0f, 1.0f), 100.0f));
@@ -70,24 +69,17 @@ void SmartCompProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     sigHpFilter.prepare(spec); sigHpFilter.reset();
 
     // Integer latency: without this getLatencyInSamples() returns a fractional
-    // group delay (3.137 and 4.433 samples here) which the (int) cast below
-    // silently truncated, leaving the dry/wet mix misaligned by a fraction of a
-    // sample. JUCE inserts the fractional part itself when asked to.
-    oversampler.setUsingIntegerLatency(true);
-    oversampler.initProcessing((size_t)samplesPerBlock);
-    oversampler.reset();
+    // group delay which the (int) cast below silently truncated, leaving the
+    // dry/wet mix misaligned by a fraction of a sample. JUCE inserts the
+    // fractional part itself when asked to.
     compOS.setUsingIntegerLatency(true);
     compOS.initProcessing((size_t)samplesPerBlock);
     compOS.reset();
 
-    // Wet path latency. The clipper's 4x oversampler was missing from this sum,
-    // and because it only ran when Clip was up, engaging Clip lengthened the wet
-    // path by 4.43 samples while the plugin kept reporting the old figure —
-    // measured as a full null at 4.8 kHz once Mix was pulled back. It runs
-    // unconditionally now, so its latency is constant and counted.
+    // Wet path latency — every stage that delays the signal, so the dry/wet mix
+    // and the host's compensation both line up.
     totalWetLatency = compressor.getLatencySamples() / compOSFactor
                     + (int)compOS.getLatencyInSamples()
-                    + (int)oversampler.getLatencyInSamples()
                     + limiter.getLatencySamples();
     setLatencySamples(totalWetLatency);
 
@@ -122,7 +114,6 @@ void SmartCompProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     prevOutTrimLin = 1.0f;
     smoothedMakeupGR = 0.0f;
     smoothedHpfFreq = 0.0f;
-    smoothedClipAmt = 0.0f;
     dcBlockL = dcBlockR = dcPrevInL = dcPrevInR = 0.0f;
     prevBypassed = false;
 
@@ -139,21 +130,15 @@ void SmartCompProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     computeKWeightingCoeffs(sampleRate);
 
 
-    // RIDE: auto-leveling coefficients
-    rideEnvCoeff = std::exp(-(float)1.0f / (float)(sampleRate * 2.0));     // ~2 sec RMS tracking
-    rideOffsetSmoothCoeff = std::exp(-1.0f / (float)(sampleRate * 0.5));   // ~0.5 sec smooth movement
-    rideEnvDB = -60.0f;
-    rideRefDB = -60.0f;
-    rideRefSet = false;
-    rideSmoothedOffset = 0.0f;
-    rideOffsetComp.store(0.0f);
+    rideSmoothedComp = 0.0f;
+    rideSmoothedInit = false;
+    rideTargetComp.store(0.0f);
 }
 
 void SmartCompProcessor::releaseResources()
 {
     compressor.reset(); limiter.reset();
     sigHpFilter.reset();
-    oversampler.reset();
     compOS.reset();
 }
 
@@ -191,36 +176,6 @@ void SmartCompProcessor::setHighPassCoefficients(juce::dsp::IIR::Coefficients<fl
     raw.getReference(4) = (float)((1.0 - alpha) / a0);
 }
 
-// Asymmetric tube-style saturator, normalised so that small signals pass at
-// unity gain.
-//
-// The old normalisation divided by the curve's *asymptote* rather than its slope
-// at zero, which made the whole stage a gain control: at Clip 100% a -60 dBFS
-// signal came out +13.4 dB louder, with 3.1 dB of asymmetry between half-cycles
-// and -26.7 dBc of distortion on a -20 dBFS input. Turning the knob up mostly
-// meant turning the level up, and the block-rate RMS rematch that tried to hide
-// that introduced its own steps of up to 3.8 dB.
-//
-// Both branches are now scaled to slope 1 at the origin, so the curve is linear
-// for quiet material and only bends where it should. The two halves still differ
-// in curvature — that asymmetry is what generates the even harmonics — but they
-// now agree in gain, so there is no discontinuity at the zero crossing.
-float SmartCompProcessor::softClipNormalized(float sample, float amount,
-                                            float drive, float slopeNorm)
-{
-    float x = sample * drive;
-    float shaped;
-    if (x > 0.0f) {
-        // d/dx[1 - exp(-x)] = 1 at x = 0
-        shaped = 1.0f - std::exp(-x);
-    } else {
-        // d/dx[-tanh(-kx)/k] = 1 at x = 0, with k = 0.7 for a gentler negative half
-        static constexpr float k = 0.7f;
-        shaped = -std::tanh(-x * k) / k;
-    }
-    float clipped = shaped * slopeNorm;   // slopeNorm = 1/drive → unity at origin
-    return sample * (1.0f - amount) + clipped * amount;
-}
 
 void SmartCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
@@ -297,10 +252,9 @@ void SmartCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mi
             fadeFromL[(size_t)i] = bypassDelayL[(size_t)rp];
             fadeFromR[(size_t)i] = bypassDelayR[(size_t)rp];
         }
-        // Clear stale oversampler state so re-engaging does not dump it into the
-        // signal. Both need it, not just the compressor's.
+        // Clear stale oversampler state so re-engaging does not dump it into
+        // the signal.
         compOS.reset();
-        oversampler.reset();
     }
 
     // Knob 0-36, negated for processing. There used to be a 29/36 remap here
@@ -497,56 +451,51 @@ void SmartCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mi
         sweetSpotHigh.store(sweetSpotHigh.load() * (1.0f - ssSmooth) + ssHighVal * ssSmooth);
     }
 
-    // === RIDE: Auto-follow Sweet Spot ===
-    // On activation: knob moves to Sweet Spot middle.
-    // As input changes (verse→chorus), Sweet Spot shifts → knob follows.
-    // Asymmetric: fast up (louder needs more comp), slow down (holds during breaths/pauses).
+    // === AUTO: follow the sweet-spot midpoint ===
+    //
+    // This computes an ABSOLUTE target in knob units, not an offset from where
+    // the user left the knob. The previous version tracked
+    // `offset = ssMid - userComp` and added it back, which cancels out: turning
+    // the knob raised userComp and lowered the offset by the same amount, so
+    // AUTO never pulled the knob back. It looked like AUTO had stopped working
+    // whenever you dragged past the sweet spot, and after switching AUTO off,
+    // driving into the red and switching it back on, the offset had to unwind
+    // from a stale value first.
+    //
+    // The editor pushes this value into the real "comp" parameter each frame
+    // unless the user is actively dragging, so the knob is never lying about
+    // what the compressor is doing — and when you let go after dragging away,
+    // it springs back.
     if (rideMode.load() && !bypassed) {
-        float ssLow = sweetSpotLow.load();
-        float ssHigh = sweetSpotHigh.load();
-        float ssMid = (ssLow + ssHigh) * 0.5f;
+        const float ssMid = (sweetSpotLow.load() + sweetSpotHigh.load()) * 0.5f;
+        const float target = juce::jlimit(0.0f, 36.0f, ssMid);
 
-        // User's knob position
-        float userComp = -compDB;
+        if (! rideSmoothedInit) {
+            // Seed from wherever the knob currently is, so engaging AUTO glides
+            // from the user's setting instead of jumping.
+            rideSmoothedComp = juce::jlimit(0.0f, 36.0f, -compDB);
+            rideSmoothedInit = true;
+        }
 
-        // Target offset
-        float targetOffset = ssMid - userComp;
-        targetOffset = juce::jlimit(-18.0f, 18.0f, targetOffset);
-
-        // Asymmetric smoothing:
-        // Moving UP (more comp needed, louder passage) → fast (0.1s)
-        // Moving DOWN (less comp, breath/pause) → slow (0.4s) with hold
-        float direction = targetOffset - rideSmoothedOffset;
+        // Asymmetric: move up quickly when the material needs more compression,
+        // ease down slowly so a breath or a pause does not make it back off.
+        const float direction = target - rideSmoothedComp;
         float smoothTime;
-        if (direction > 0.2f) {
-            // Target is higher than current → need more comp → fast follow
-            smoothTime = 0.1f;
-        } else if (direction < -0.2f) {
-            // Target is lower → could be breath/pause → slow, hold position
-            smoothTime = 0.4f;
-        } else {
-            // Near target → gentle tracking
-            smoothTime = 0.15f;
-        }
-        float offSmooth = std::exp(-(float)numSamples / (currentSampleRate * smoothTime));
-        rideSmoothedOffset = rideSmoothedOffset * offSmooth + targetOffset * (1.0f - offSmooth);
+        if (direction > 0.2f)       smoothTime = 0.10f;   // needs more comp — follow fast
+        else if (direction < -0.2f) smoothTime = 0.40f;   // could be a pause — hold
+        else                        smoothTime = 0.15f;   // near target — gentle
 
-        rideOffsetComp.store(rideSmoothedOffset);
+        const float k = std::exp(-(float)numSamples / (currentSampleRate * smoothTime));
+        rideSmoothedComp = rideSmoothedComp * k + target * (1.0f - k);
+        if (! std::isfinite(rideSmoothedComp)) rideSmoothedComp = target;
+
+        rideTargetComp.store(rideSmoothedComp);
+        compDB = -rideSmoothedComp;
     } else {
-        // RIDE off: smoothly return to zero (~0.3 sec)
-        if (std::abs(rideSmoothedOffset) > 0.01f) {
-            float offSmooth = std::exp(-(float)numSamples / (currentSampleRate * 0.3));
-            rideSmoothedOffset *= offSmooth;
-            rideOffsetComp.store(rideSmoothedOffset);
-        } else {
-            rideSmoothedOffset = 0.0f;
-            rideOffsetComp.store(0.0f);
-        }
+        rideSmoothedInit = false;
+        rideTargetComp.store(0.0f);
     }
 
-    // Apply RIDE offset to compDB (scale to internal range)
-    float rideOff = rideSmoothedOffset;
-    compDB -= rideOff;
     compDB = juce::jlimit(-36.0f, 0.0f, compDB);
 
     // dlySize needed for dry/wet mix
@@ -663,62 +612,7 @@ void SmartCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mi
             }
             prevMakeupLin = makeupLin;
 
-            // 5. Soft Clipper — harmonic saturation, 4x oversampled.
-            //
-            // This sits BEFORE the limiter now. It used to run after both the
-            // limiter and the safety clip with nothing bounding it, so with the
-            // ceiling at -6 dBFS and Clip at 100% the output reached -0.53 dBFS,
-            // 5.5 dB above what the user asked for. Putting it ahead of the
-            // limiter means the ceiling is always respected.
-            //
-            // The oversampler runs unconditionally so the reported latency stays
-            // constant: crossing the clip threshold used to change plugin latency
-            // mid-stream and dump the oversampler's stale IIR state into the
-            // signal. With clipAmt at 0 the waveshaper is an identity, so this
-            // only costs the up/down conversion.
-            float clipTarget = apvts.getRawParameterValue("clip")->load() / 100.0f;
-            {
-                const float pSmooth = std::exp(-(float)numSamples / (float)(currentSampleRate * 0.030));
-                smoothedClipAmt = smoothedClipAmt * pSmooth + clipTarget * (1.0f - pSmooth);
-                if (! std::isfinite(smoothedClipAmt)) smoothedClipAmt = clipTarget;
-                if (std::abs(clipTarget - smoothedClipAmt) < 0.0005f) smoothedClipAmt = clipTarget;
-            }
-            const float clipAmt = smoothedClipAmt;
-            {
-                juce::dsp::AudioBlock<float> block(buffer);
-                auto osBlock = oversampler.processSamplesUp(block);
-                int osN = (int)osBlock.getNumSamples();
-
-                if (clipAmt > 0.001f) {
-                    // Loop invariants: drive and both normalisation terms depend
-                    // only on clipAmt, which is constant across the block. These
-                    // were being recomputed for every one of 4 x numSamples x 2
-                    // samples — three transcendentals each.
-                    const float drive = 1.0f + clipAmt * 4.0f;
-                    const float slopeNorm = 1.0f / drive;
-                    float totalDistortion = 0.0f;
-                    int distCount = 0;
-                    for (int ch = 0; ch < 2; ++ch) {
-                        float* d = osBlock.getChannelPointer((size_t)ch);
-                        for (int i = 0; i < osN; ++i) {
-                            float before = d[i];
-                            d[i] = softClipNormalized(before, clipAmt, drive, slopeNorm);
-                            if (std::abs(before) > 0.05f) {
-                                totalDistortion += std::abs(d[i] - before) / std::abs(before);
-                                distCount++;
-                            }
-                        }
-                    }
-                    float avgDist = distCount > 0 ? totalDistortion / (float)distCount : 0.0f;
-                    clipActivity.store(juce::jlimit(0.0f, 1.0f, avgDist * 8.0f));
-                } else {
-                    clipActivity.store(0.0f);
-                }
-
-                oversampler.processSamplesDown(block);
-            }
-
-            // 7. Measure output LUFS BEFORE gain match (prevents feedback loop)
+            // 5. Measure output LUFS BEFORE gain match (prevents feedback loop)
             {
                 float preMatchKSumSq = 0;
                 for (int i = 0; i < numSamples; ++i) {
@@ -759,7 +653,7 @@ void SmartCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mi
                 }
             }
 
-            // 8. Apply gain match (HONEST mode) — per-sample interpolated with slew limit
+            // 6. Apply gain match (HONEST mode) — per-sample interpolated with slew limit
             if (gainMatchEnabled.load() || honestMode.load()) {
                 float offsetDB = gainMatchOffsetDB.load();
                 // Slew-limit in dB: max 0.5dB per 50ms — completely inaudible
@@ -782,7 +676,7 @@ void SmartCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mi
                 gainMatchOffsetDB.store(0.0f);  // reset so HONEST starts clean
             }
 
-            // 8b. Limiter — last gain stage before the mix.
+            // 7. Limiter — last gain stage before the mix.
             // It sits after HONEST rather than before it: HONEST can boost by up
             // to 6 dB, so applying it downstream of the limiter let it push past
             // the ceiling, and the tanh waveshaper that used to patch that over
@@ -792,7 +686,7 @@ void SmartCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mi
             // before any gain match, so there is no feedback path.
             limiter.process(left, right, numSamples, CEILING_DB);
 
-            // 8c. Safety clamp. The limiter holds the ceiling to within 0.03 dB
+            // 7b. Safety clamp. The limiter holds the ceiling to within 0.03 dB
             // now, so this only has to catch that residue. It used to be a
             // rational saturator starting 2.5 dB *below* the ceiling, which made
             // it the real peak controller — and being un-oversampled it produced

@@ -193,7 +193,7 @@ void SmartCompEditor::SmartCompLookAndFeel::drawRotarySlider(
     juce::String name = slider.getName();
     g.setFont(juce::Font("Arial", 11.0f, juce::Font::plain));
     g.setColour(C::white);
-    if (name == "HP Filter" || name == "SC HPF" || name == "Soft Clip") {
+    if (name == "HP Filter" || name == "SC HPF") {
         g.drawText(val < 1 ? "OFF" : juce::String(val), x, y, width, height, juce::Justification::centred);
     } else if (name == "Gate") {
         g.drawText(val <= -79 ? "OFF" : juce::String(val), x, y, width, height, juce::Justification::centred);
@@ -238,6 +238,10 @@ SmartCompEditor::SmartCompEditor(SmartCompProcessor& p)
     compSlider.setSliderSnapsToMousePosition(false);
     compSlider.onValueChange = [this] {
         float v = (float)compSlider.getValue();
+        // The magnet is a manual-drag aid. With AUTO on it would fight the
+        // value AUTO is writing every frame — snapping to a boundary, AUTO
+        // pulling back to the midpoint, and so on.
+        if (processor.rideMode.load()) { lastCompValue = v; return; }
         // Dynamic magnet stops at vocal state boundaries
         // Only snap when moving TOWARD the point, not when dragging through
         float ssLow = processor.sweetSpotLow.load();
@@ -275,7 +279,6 @@ SmartCompEditor::SmartCompEditor(SmartCompProcessor& p)
     inTrimAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.apvts, "inTrim", inTrimSlider);
     gainAttach  = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.apvts, "gain",  gainSlider);
     hpfAttach   = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.apvts, "hpf",   hpfSlider);
-    clipAttach  = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.apvts, "clip",  clipSlider);
     mixAttach   = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.apvts, "mix",   mixSlider);
 
 
@@ -305,8 +308,6 @@ SmartCompEditor::SmartCompEditor(SmartCompProcessor& p)
     setupAdv(gateSlider, gateLabel, "Gate", "GATE");
     gateSlider.setDoubleClickReturnValue(true, -80.0f);
 
-    setupAdv(clipSlider, clipLabel, "Soft Clip", "CLIP");
-    clipSlider.setDoubleClickReturnValue(true, 0.0f);
 
     setupAdv(scHpfSlider, scHpfLabel, "SC HPF", "SC HPF");
     scHpfAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.apvts, "schpf", scHpfSlider);
@@ -322,9 +323,19 @@ void SmartCompEditor::timerCallback()
 {
     auto bal = [](float& c, float t) { c = (t > c) ? c * 0.3f + t * 0.7f : c * 0.88f + t * 0.12f; };
     bal(displayGR, processor.compGainReductionDB.load());
-    bal(displayClipDB, processor.clipActivity.load());
     bal(displayInL, processor.inputPeakL.load()); bal(displayInR, processor.inputPeakR.load());
     bal(displayOutL, processor.outputPeakL.load()); bal(displayOutR, processor.outputPeakR.load());
+
+    // AUTO drives the real knob, so what you see is always what the compressor
+    // is using. While the user is dragging we leave it alone — release the
+    // mouse and it springs back to the sweet spot rather than sitting wherever
+    // it was let go.
+    if (processor.rideMode.load() && ! compSlider.isMouseButtonDown())
+    {
+        const float target = processor.rideTargetComp.load();
+        if (std::abs((float)compSlider.getValue() - target) > 0.01f)
+            compSlider.setValue(target, juce::sendNotificationSync);
+    }
 
     // Sweet spot entry detection
     {
@@ -364,8 +375,6 @@ void SmartCompEditor::timerCallback()
         hpfLabel.setText(hpfVal < 1.0f ? "OFF" : "Hz", juce::dontSendNotification);
         float scHpfVal = processor.apvts.getRawParameterValue("schpf")->load();
         scHpfLabel.setText(scHpfVal < 1.0f ? "OFF" : "Hz", juce::dontSendNotification);
-        float clipVal = processor.apvts.getRawParameterValue("clip")->load();
-        clipLabel.setText(clipVal < 1.0f ? "OFF" : "%", juce::dontSendNotification);
     }
 
     // Tooltip hover detection in timer (works over child components)
@@ -587,7 +596,13 @@ void SmartCompEditor::paint(juce::Graphics& g)
     // === RIDE METER (between IN and knob) ===
     {
         bool isRide = processor.rideMode.load();
-        float rideOff = processor.rideOffsetComp.load();
+        // The meter used to show AUTO's offset from the user's knob position.
+        // AUTO writes the knob directly now, so there is no offset to show —
+        // instead this tracks the sweet-spot band and where the knob sits inside
+        // it, which is what makes AUTO's live movement visible.
+        const float ssLowV = processor.sweetSpotLow.load();
+        const float ssHighV = processor.sweetSpotHigh.load();
+        const float compNow = processor.apvts.getRawParameterValue("comp")->load();
         int rideW = L.rideW;
         int rideX = L.rideX;
         int rideTop = L.meterY;
@@ -613,53 +628,44 @@ void SmartCompEditor::paint(juce::Graphics& g)
         g.setColour(isRide ? juce::Colour(0xff50c050).withAlpha(0.35f) : C::border);
         g.drawRoundedRectangle((float)rideX, (float)rideTop, (float)rideW, (float)rideH, 5.0f, 1.0f);
 
-        // Center line
-        g.setColour(C::dim.withAlpha(0.5f));
-        g.drawLine((float)(rideX + 5), rideCenterY, (float)(rideX + rideW - 5), rideCenterY, 1.0f);
+        // Scale: knob units, 0 at the bottom to 36 at the top
+        const float trackTop = (float)rideTop + 12.0f;
+        const float trackBot = (float)(rideTop + rideH) - 12.0f;
+        auto yForComp = [&](float v) {
+            return trackBot - juce::jlimit(0.0f, 1.0f, v / 36.0f) * (trackBot - trackTop);
+        };
 
-        // Scale marks at ±6 and ±12
-        for (float db : { -12.0f, -6.0f, 6.0f, 12.0f }) {
-            float markY = rideCenterY - (db / 18.0f) * (float)(rideH / 2 - 12);
-            g.setColour(C::label.withAlpha(0.45f));
-            g.drawLine((float)(rideX + 6), markY, (float)(rideX + rideW - 6), markY, 0.7f);
+        for (float v : { 9.0f, 18.0f, 27.0f }) {
+            g.setColour(C::label.withAlpha(0.35f));
+            g.drawLine((float)(rideX + 6), yForComp(v), (float)(rideX + rideW - 6), yForComp(v), 0.7f);
         }
-
-        // Scale labels
         g.setFont(juce::Font("Arial", 7.0f, juce::Font::bold));
         g.setColour(C::label.withAlpha(0.5f));
-        g.drawText("+18", rideX - 2, rideTop + 2, rideW + 4, 8, juce::Justification::centred);
-        g.drawText("-18", rideX - 2, rideTop + rideH - 10, rideW + 4, 8, juce::Justification::centred);
+        g.drawText("36", rideX - 2, rideTop + 2, rideW + 4, 8, juce::Justification::centred);
+        g.drawText("0", rideX - 2, rideTop + rideH - 10, rideW + 4, 8, juce::Justification::centred);
+
+        // Sweet-spot band, always drawn: it is the thing AUTO is aiming at, and
+        // seeing it drift is what tells you the analysis is live.
+        {
+            float yHi = yForComp(ssHighV), yLo = yForComp(ssLowV);
+            g.setColour(C::accent.withAlpha(isRide ? 0.28f : 0.14f));
+            g.fillRoundedRectangle((float)(rideX + 4), yHi,
+                                   (float)(rideW - 8), std::max(2.0f, yLo - yHi), 3.0f);
+        }
 
         if (isRide) {
-            float absOff = std::abs(rideOff);
-            float norm = juce::jlimit(-1.0f, 1.0f, rideOff / 18.0f);
-            float barHalf = (float)(rideH / 2 - 12);
+            // Current position — sits inside the band while AUTO is settled, and
+            // visibly travels back into it after a manual drag.
+            float dotY = yForComp(compNow);
+            g.setColour(juce::Colour(0xff50c050).withAlpha(0.30f));
+            g.fillEllipse((float)(rideX + rideW / 2 - 6), dotY - 6, 12.0f, 12.0f);
+            g.setColour(juce::Colour(0xff50c050));
+            g.fillEllipse((float)(rideX + rideW / 2 - 3), dotY - 3, 6.0f, 6.0f);
 
-            // Fill bar from center
-            if (absOff > 0.15f) {
-                float barH = std::abs(norm) * barHalf;
-                float barY = norm > 0 ? rideCenterY - barH : rideCenterY;
-                g.setColour(juce::Colour(0xff50c050).withAlpha(0.5f));
-                g.fillRoundedRectangle((float)(rideX + 5), barY, (float)(rideW - 10), barH, 3.0f);
-                // Glow
-                g.setColour(juce::Colour(0xff50c050).withAlpha(0.15f));
-                g.fillRoundedRectangle((float)(rideX + 3), barY - 1, (float)(rideW - 6), barH + 2, 4.0f);
-            }
-
-            // Floating indicator dot
-            if (absOff > 0.25f) {
-                float dotY = rideCenterY - norm * barHalf;
-                g.setColour(juce::Colour(0xff50c050).withAlpha(0.3f));
-                g.fillEllipse((float)(rideX + rideW / 2 - 5), dotY - 5, 10.0f, 10.0f);
-                g.setColour(juce::Colour(0xff50c050));
-                g.fillEllipse((float)(rideX + rideW / 2 - 3), dotY - 3, 6.0f, 6.0f);
-            }
-
-            // Value readout
             g.setFont(juce::Font("Arial", 9.0f, juce::Font::bold));
             g.setColour(juce::Colour(0xff50c050));
-            juce::String rideStr = absOff < 0.15f ? "0.0" : ((rideOff > 0 ? "+" : "") + juce::String(rideOff, 1));
-            g.drawText(rideStr, rideX, (int)rideCenterY - 5, rideW, 10, juce::Justification::centred);
+            g.drawText(juce::String(compNow, 1), rideX, (int)rideCenterY - 5, rideW, 10,
+                       juce::Justification::centred);
         } else {
             // OFF indicator
             g.setFont(juce::Font("Arial", 9.0f, juce::Font::bold));
@@ -697,9 +703,10 @@ void SmartCompEditor::paint(juce::Graphics& g)
     }
 
     // === BIG KNOB (custom drawn) ===
-    float userComp = processor.apvts.getRawParameterValue("comp")->load();
-    float rideOff = processor.rideOffsetComp.load();
-    float effectiveComp = juce::jlimit(0.0f, 36.0f, userComp + rideOff);
+    // AUTO writes the real "comp" parameter, so the knob position IS the value
+    // driving the compressor — no separate offset to fold in.
+    float effectiveComp = juce::jlimit(0.0f, 36.0f,
+        processor.apvts.getRawParameterValue("comp")->load());
     float compNorm = effectiveComp / 36.0f;
     drawBigKnob(g, contentCx, meterY + meterH / 2, knobSize / 2, compNorm, displayGR);
 
@@ -865,7 +872,7 @@ void SmartCompEditor::paint(juce::Graphics& g)
         g.setColour(C::border); g.drawRoundedRectangle(r, 8.0f, 1.0f);
     }
 
-    // ADV button — left side, 3x height of right pills, aligned with CLIP top / CHAR bottom
+    // ADV button — left side, tall enough to read as a panel toggle
     {
         int pillW2 = 46, pillH2 = 20, pillGap2 = 4;
         int rightTotalH = pillH2 * 3 + pillGap2 * 2;  // 68px
@@ -881,27 +888,6 @@ void SmartCompEditor::paint(juce::Graphics& g)
         g.setColour(advOpen ? C::accent : C::label);
         g.drawText("ADV", advToggleRect, juce::Justification::centred);
 
-    }
-
-    // CLIP activity indicator. Read-only now: the amount is a knob in the ADV
-    // panel, because the pill toggled a hardcoded 15% that measured 0.22 dB of
-    // peak reduction — a control that promised something it did not deliver.
-    {
-        bool clipOn = processor.apvts.getRawParameterValue("clip")->load() > 1.0f;
-        if (clipOn) {
-            float clipAct = processor.clipActivity.load();
-            int dotW = 46, dotH = 20;
-            int dotX = w - 16 - 12 - dotW;
-            int dotY = kcY + (kcH - dotH) / 2 + 6;
-            auto r = juce::Rectangle<float>((float)dotX, (float)dotY, (float)dotW, (float)dotH);
-            g.setColour(C::clipCol.withAlpha(0.12f + clipAct * 0.35f));
-            g.fillRoundedRectangle(r, 5.0f);
-            g.setColour(C::clipCol.withAlpha(0.4f + clipAct * 0.4f));
-            g.drawRoundedRectangle(r, 5.0f, clipAct > 0.1f ? 1.5f : 1.0f);
-            g.setFont(juce::Font("Arial", 9.0f, juce::Font::bold));
-            g.setColour(C::clipCol);
-            g.drawText("CLIP", r, juce::Justification::centred);
-        }
     }
 
     // === GR TIMELINE + ADV PANEL (both inside collapsible ADV) ===
@@ -944,26 +930,23 @@ void SmartCompEditor::paint(juce::Graphics& g)
         int knobAreaLeft = panelInnerX + 8;
         int knobAreaRight = panelInnerX + panelInnerW;
         int knobAreaW2 = knobAreaRight - knobAreaLeft;
-        int colW = knobAreaW2 / 4;
+        int colW = knobAreaW2 / 3;
         int row1Y = knobTopY;
         g.setFont(juce::Font("Arial", 10.0f, juce::Font::bold));
         g.setColour(C::label.brighter(0.3f));
         g.drawText("GATE", knobAreaLeft, row1Y - 14, colW, 12, juce::Justification::centred);
         g.drawText("HPF", knobAreaLeft + colW, row1Y - 14, colW, 12, juce::Justification::centred);
         g.drawText("SC HPF", knobAreaLeft + colW * 2, row1Y - 14, colW, 12, juce::Justification::centred);
-        g.drawText("CLIP", knobAreaLeft + colW * 3, row1Y - 14, colW, 12, juce::Justification::centred);
 
         hpfSlider.setVisible(true); hpfLabel.setVisible(true);
         gateSlider.setVisible(true); gateLabel.setVisible(true);
         scHpfSlider.setVisible(true); scHpfLabel.setVisible(true);
-        clipSlider.setVisible(true); clipLabel.setVisible(true);
     }
     else
     {
         hpfSlider.setVisible(false); hpfLabel.setVisible(false);
         gateSlider.setVisible(false); gateLabel.setVisible(false);
         scHpfSlider.setVisible(false); scHpfLabel.setVisible(false);
-        clipSlider.setVisible(false); clipLabel.setVisible(false);
     }
 
     // === INFO BUTTON ===
@@ -1091,7 +1074,7 @@ void SmartCompEditor::paint(juce::Graphics& g)
 void SmartCompEditor::setControlsInteractive(bool on)
 {
     for (auto* s : { &compSlider, &gateSlider, &gainSlider, &hpfSlider,
-                     &clipSlider, &mixSlider, &inTrimSlider, &scHpfSlider })
+                     &mixSlider, &inTrimSlider, &scHpfSlider })
         s->setInterceptsMouseClicks(on, on);
     bypassBtn.setInterceptsMouseClicks(on, on);
 }
@@ -1456,9 +1439,8 @@ void SmartCompEditor::drawBigKnob(juce::Graphics& g, int cx, int cy, int radius,
     g.setColour(arcCol);
     g.fillEllipse(pd.x - 3.5f, pd.y - 3.5f, 7.0f, 7.0f);
 
-    // Center value — show effective compression amount (includes RIDE offset)
     float compVal2 = juce::jlimit(0.0f, 36.0f,
-        processor.apvts.getRawParameterValue("comp")->load() + processor.rideOffsetComp.load());
+        processor.apvts.getRawParameterValue("comp")->load());
 
     g.setFont(juce::Font("Helvetica Neue", 37.0f, juce::Font::plain));
     g.setColour(C::white);
@@ -1575,8 +1557,6 @@ void SmartCompEditor::drawGRTimeline(juce::Graphics& g, juce::Rectangle<int> are
     int histSize = RVoxCompressor::GR_HISTORY_SIZE;
     int viewSlots = grTimelineFast ? 256 : histSize;
 
-    bool clipOn = processor.apvts.getRawParameterValue("clip")->load() > 1.0f;
-    float clipAct = clipOn ? processor.clipActivity.load() : 0.0f;
 
     // Build continuous paths — NO gaps, NO vector allocations
     juce::Path inTop, inBot, outTop, outBot, grPath;
@@ -1661,9 +1641,7 @@ void SmartCompEditor::drawGRTimeline(juce::Graphics& g, juce::Rectangle<int> are
 
     // === DRAW: Output waveform (hero) ===
     {
-        juce::Colour outCol = clipAct > 0.02f
-            ? C::accent.interpolatedWith(C::clipCol, juce::jlimit(0.0f, 0.7f, clipAct))
-            : C::accent;
+        juce::Colour outCol = C::accent;
 
         juce::Path fill(outTop);
         for (int i = pw - 1; i >= 0; --i)
@@ -1765,7 +1743,7 @@ void SmartCompEditor::resized()
     compSlider.setAlpha(0.0f);
     compLabel.setVisible(false);
 
-    // Secondary knobs — between ADV left and CLIP right
+    // Secondary knobs — the main row under the big knob
     int knobSz = 66;
     int numKnobs = 3;
     int knobAreaW = L.w - 32 - L.knobLeftMargin - L.knobRightMargin;
@@ -1786,7 +1764,6 @@ void SmartCompEditor::resized()
     if (!advOpen) {
         hpfSlider.setVisible(false); hpfLabel.setVisible(false);
         gateSlider.setVisible(false); gateLabel.setVisible(false);
-        clipSlider.setVisible(false); clipLabel.setVisible(false);
     }
 
     // ADV panel
@@ -1798,7 +1775,7 @@ void SmartCompEditor::resized()
         int knobAreaLeft = panelX + 8;
         int knobAreaRight = panelX + advPanelW;
         int knobAreaW2 = knobAreaRight - knobAreaLeft;
-        int colW = knobAreaW2 / 4;
+        int colW = knobAreaW2 / 3;
 
         int knobBlockH = advKnobSz + 2 + 14;
         int knobTopY = panelTopY + (L.panelH - knobBlockH) / 2 + 6;
@@ -1812,12 +1789,10 @@ void SmartCompEditor::resized()
         placeAdvKnob(gateSlider, gateLabel, 0);
         placeAdvKnob(hpfSlider, hpfLabel, 1);
         placeAdvKnob(scHpfSlider, scHpfLabel, 2);
-        placeAdvKnob(clipSlider, clipLabel, 3);
 
         gateSlider.setVisible(true); gateLabel.setVisible(true);
         hpfSlider.setVisible(true); hpfLabel.setVisible(true);
         scHpfSlider.setVisible(true); scHpfLabel.setVisible(true);
-        clipSlider.setVisible(true); clipLabel.setVisible(true);
     }
 }
 
@@ -1850,7 +1825,7 @@ SmartCompEditor::TooltipInfo SmartCompEditor::getTooltipFor(const juce::String& 
     if (el == "gain") return {
         "Output Gain",
         "Manual output level adjustment applied after compression, "
-        "limiter, and clipper stages. Additive to auto-makeup gain.",
+        "limiter stages. Additive to auto-makeup gain.",
         "Range: -36 to 0 dB | Post-limiter in signal chain"
     };
     if (el == "hpf") return {
@@ -1908,24 +1883,13 @@ SmartCompEditor::TooltipInfo SmartCompEditor::getTooltipFor(const juce::String& 
     if (el == "ride") return {
         "AUTO Mode",
         "Automatically keeps the compressor in the Sweet Spot. "
-        "Tracks input dynamics and adjusts compression in real-time — "
-        "louder passages get less comp, quieter passages get more. "
-        "The Big Knob moves to show the effective setting. "
+        "Tracks input dynamics and moves the knob in real time. "
+        "Drag the knob while AUTO is on and it springs back to the "
+        "Sweet Spot the moment you let go. "
         "Ignores breaths and pauses to stay stable.",
         "Tracking: asymmetric (fast up 0.1s, slow down 0.4s)\n"
-        "Range: ±18 dB | Gate: -35 dBFS (ignores breaths)\n"
+        "Gate: -35 dBFS (ignores breaths)\n"
         "Target: Sweet Spot center, continuously updated"
-    };
-    if (el == "clip") return {
-        "Asymmetric Saturation",
-        "Tube-style waveshaping with asymmetric clipping curve. "
-        "Positive peaks clip harder (exponential), negative peaks "
-        "clip softer — generating even harmonics (2nd, 4th) for "
-        "musical warmth. Subtle harmonic sweetener scales with drive.",
-        "Positive: 1-exp(-x) | Negative: tanh(0.7x)\n"
-        "2nd harmonic sweetener: 6% at full drive\n"
-        "Oversampled 4x to prevent aliasing\n"
-        "Activity meter on button: dim=idle, bright=active"
     };
     if (el == "adv") return {
         "Advanced Panel",

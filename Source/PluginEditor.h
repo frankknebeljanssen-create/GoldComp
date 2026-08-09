@@ -28,10 +28,10 @@ public:
 
     SmartCompProcessor& processor;
 
-    juce::Slider compSlider, gainSlider, gateSlider, hpfSlider, clipSlider, mixSlider;
-    juce::Label compLabel, gainLabel, gateLabel, hpfLabel, clipLabel, mixLabel;
+    juce::Slider compSlider, gainSlider, gateSlider, hpfSlider, mixSlider;
+    juce::Label compLabel, gainLabel, gateLabel, hpfLabel, mixLabel;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
-        compAttach, gainAttach, gateAttach, hpfAttach, clipAttach, mixAttach;
+        compAttach, gainAttach, gateAttach, hpfAttach, mixAttach;
 
     juce::ToggleButton bypassBtn;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> bypassAttach;
@@ -82,7 +82,6 @@ public:
     void recalcLayout();
 
     float displayGR = 0, displayOutL = 0, displayOutR = 0, displayInL = 0, displayInR = 0;
-    float displayClipDB = 0;
     float displayInLUFS = -60.0f, displayOutLUFS = -60.0f, displayOffsetDB = 0.0f;
     float lastCompValue = 0.0f;  // for magnet snap direction tracking
     bool wasInSweetSpot = false;

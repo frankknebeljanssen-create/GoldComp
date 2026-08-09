@@ -82,3 +82,21 @@ target_link_libraries(ui_shot
         juce::juce_dsp
     PUBLIC
         juce::juce_recommended_config_flags)
+
+# Behavioural probe for AUTO. dsp_bench covers the DSP in isolation; this one
+# drives the whole processor and checks that the comp parameter converges on the
+# sweet-spot band, springs back after a manual drag, and recovers after being
+# parked in the red with AUTO off — the three cases that were broken when AUTO
+# tracked an offset instead of an absolute target.
+juce_add_console_app(auto_probe PRODUCT_NAME "auto_probe")
+target_sources(auto_probe PRIVATE tests/auto_probe.cpp)
+target_compile_definitions(auto_probe PUBLIC
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0)
+target_link_libraries(auto_probe
+    PRIVATE
+        SmartComp
+        juce::juce_audio_utils
+        juce::juce_dsp
+    PUBLIC
+        juce::juce_recommended_config_flags)
