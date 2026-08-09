@@ -13,7 +13,7 @@ SANDBOX_DIR="$HOME/Dropbox/plugin sandbox"
 # Dropbox restore a stale CMakeCache mid-session and broke configure. Copying
 # the finished bundle into Dropbox afterwards is fine — nothing reads it back.
 BUILD_DIR="$HOME/Library/Caches/SmartComp-build"
-JUCE_DIR="$HOME/Library/Caches/GoldComp-juce"
+JUCE_DIR="$HOME/Library/Caches/SmartComp-juce"
 
 if [ ! -d "$JUCE_DIR" ]; then
     echo "Downloading JUCE to $JUCE_DIR ..."
