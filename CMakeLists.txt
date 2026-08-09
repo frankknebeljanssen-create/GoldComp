@@ -19,7 +19,7 @@ juce_add_plugin(SmartComp
     COPY_PLUGIN_AFTER_BUILD FALSE
     PLUGIN_MANUFACTURER_CODE FkAu
     PLUGIN_CODE SmCp
-    FORMATS VST3 AU
+    FORMATS VST3 AU Standalone
     PRODUCT_NAME "SmartComp")
 
 target_sources(SmartComp

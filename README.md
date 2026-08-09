@@ -2,8 +2,7 @@
 
 Free vocal compressor for macOS (VST3/AU) that finds its own sweet spot.
 
-<!-- Screenshot: drop a PNG at docs/screenshot.png and uncomment the line below -->
-<!-- ![SmartComp screenshot](docs/screenshot.png) -->
+![SmartComp screenshot](docs/screenshot.png)
 
 ## Why
 
