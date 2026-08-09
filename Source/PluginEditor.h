@@ -2,11 +2,17 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "PluginProcessor.h"
 
-class GoldCompEditor : public juce::AudioProcessorEditor, private juce::Timer
+class SmartCompEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
+    // Wordmark, split into the accent-coloured and white halves. Kept in one
+    // place so the header and the credits panel cannot drift apart, and so the
+    // sibling plugin only has to change these two strings.
+    static constexpr const char* LOGO_A = "SMART";
+    static constexpr const char* LOGO_B = "COMP";
+
 public:
-    explicit GoldCompEditor(GoldCompProcessor&);
-    ~GoldCompEditor() override;
+    explicit SmartCompEditor(SmartCompProcessor&);
+    ~SmartCompEditor() override;
     void paint(juce::Graphics&) override;
     void paintOverChildren(juce::Graphics&) override;
     void resized() override;
@@ -20,7 +26,7 @@ public:
     void mouseMove(const juce::MouseEvent&) override;
     void mouseExit(const juce::MouseEvent&) override;
 
-    GoldCompProcessor& processor;
+    SmartCompProcessor& processor;
 
     juce::Slider compSlider, gainSlider, gateSlider, hpfSlider, clipSlider, mixSlider;
     juce::Label compLabel, gainLabel, gateLabel, hpfLabel, clipLabel, mixLabel;
@@ -126,15 +132,15 @@ public:
     }
     int S(int v) const { return (int)(v * getScale()); }  // scale helper for setBounds
 
-    class GoldCompLookAndFeel : public juce::LookAndFeel_V4
+    class SmartCompLookAndFeel : public juce::LookAndFeel_V4
     {
     public:
-        GoldCompLookAndFeel();
+        SmartCompLookAndFeel();
         void drawRotarySlider(juce::Graphics&, int, int, int, int, float, float, float, juce::Slider&) override;
         void drawButtonBackground(juce::Graphics&, juce::Button&, const juce::Colour&, bool, bool) override;
         void drawToggleButton(juce::Graphics&, juce::ToggleButton&, bool, bool) override;
     };
 
-    GoldCompLookAndFeel goldLNF;
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(GoldCompEditor)
+    SmartCompLookAndFeel goldLNF;
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SmartCompEditor)
 };

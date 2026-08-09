@@ -312,7 +312,7 @@ bool testSlidingMinimum()
 
 int main()
 {
-    std::printf ("\n=== GoldComp DSP bench @ %.0f Hz ===\n\n", SR);
+    std::printf ("\n=== SmartComp DSP bench @ %.0f Hz ===\n\n", SR);
     if (! testSlidingMinimum())
         return 1;
     benchGainStaging();

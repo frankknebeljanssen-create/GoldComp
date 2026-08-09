@@ -1,7 +1,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
-GoldCompProcessor::GoldCompProcessor()
+SmartCompProcessor::SmartCompProcessor()
     : AudioProcessor(BusesProperties()
                      .withInput("Input", juce::AudioChannelSet::stereo(), true)
                      .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
@@ -9,9 +9,9 @@ GoldCompProcessor::GoldCompProcessor()
 {
 }
 
-GoldCompProcessor::~GoldCompProcessor() {}
+SmartCompProcessor::~SmartCompProcessor() {}
 
-juce::AudioProcessorValueTreeState::ParameterLayout GoldCompProcessor::createParameterLayout()
+juce::AudioProcessorValueTreeState::ParameterLayout SmartCompProcessor::createParameterLayout()
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
 
@@ -51,7 +51,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout GoldCompProcessor::createPar
     return { params.begin(), params.end() };
 }
 
-void GoldCompProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
+void SmartCompProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     currentSampleRate = sampleRate;
     // The compressor is fed the 2x oversampled block, so it must be prepared at
@@ -149,7 +149,7 @@ void GoldCompProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     rideOffsetComp.store(0.0f);
 }
 
-void GoldCompProcessor::releaseResources()
+void SmartCompProcessor::releaseResources()
 {
     compressor.reset(); limiter.reset();
     sigHpFilter.reset();
@@ -157,7 +157,7 @@ void GoldCompProcessor::releaseResources()
     compOS.reset();
 }
 
-bool GoldCompProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
+bool SmartCompProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
 {
     const auto in  = layouts.getMainInputChannelSet();
     const auto out = layouts.getMainOutputChannelSet();
@@ -173,7 +173,7 @@ bool GoldCompProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
 
 // Writes RBJ high-pass coefficients into an existing Coefficients object.
 // Allocation-free, so it is safe to call from processBlock.
-void GoldCompProcessor::setHighPassCoefficients(juce::dsp::IIR::Coefficients<float>& c,
+void SmartCompProcessor::setHighPassCoefficients(juce::dsp::IIR::Coefficients<float>& c,
                                                 double sampleRate, float freq)
 {
     const double w0 = 2.0 * juce::MathConstants<double>::pi
@@ -205,7 +205,7 @@ void GoldCompProcessor::setHighPassCoefficients(juce::dsp::IIR::Coefficients<flo
 // for quiet material and only bends where it should. The two halves still differ
 // in curvature — that asymmetry is what generates the even harmonics — but they
 // now agree in gain, so there is no discontinuity at the zero crossing.
-float GoldCompProcessor::softClipNormalized(float sample, float amount,
+float SmartCompProcessor::softClipNormalized(float sample, float amount,
                                             float drive, float slopeNorm)
 {
     float x = sample * drive;
@@ -222,7 +222,7 @@ float GoldCompProcessor::softClipNormalized(float sample, float amount,
     return sample * (1.0f - amount) + clipped * amount;
 }
 
-void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+void SmartCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
     if (buffer.getNumChannels() < 1) return;
@@ -907,31 +907,31 @@ void GoldCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     limiterGainReductionDB.store(bypassed ? 0.0f : limiter.getGainReductionDB());
 }
 
-juce::AudioProcessorEditor* GoldCompProcessor::createEditor() { return new GoldCompEditor(*this); }
+juce::AudioProcessorEditor* SmartCompProcessor::createEditor() { return new SmartCompEditor(*this); }
 
-juce::AudioProcessorParameter* GoldCompProcessor::getBypassParameter() const
+juce::AudioProcessorParameter* SmartCompProcessor::getBypassParameter() const
 {
     return apvts.getParameter("bypass");
 }
 
-void GoldCompProcessor::getStateInformation(juce::MemoryBlock& destData)
+void SmartCompProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
     auto state = apvts.copyState();
     std::unique_ptr<juce::XmlElement> xml(state.createXml());
     copyXmlToBinary(*xml, destData);
 }
 
-void GoldCompProcessor::setStateInformation(const void* data, int sizeInBytes)
+void SmartCompProcessor::setStateInformation(const void* data, int sizeInBytes)
 {
     std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(data, sizeInBytes));
     if (xml != nullptr && xml->hasTagName(apvts.state.getType()))
         apvts.replaceState(juce::ValueTree::fromXml(*xml));
 }
 
-juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new GoldCompProcessor(); }
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new SmartCompProcessor(); }
 
 // ===== K-Weighting Filters for LUFS (ITU-R BS.1770) =====
-void GoldCompProcessor::computeKWeightingCoeffs(double sampleRate)
+void SmartCompProcessor::computeKWeightingCoeffs(double sampleRate)
 {
     // Stage 1: Pre-filter (high shelf, ~+4dB above 1681Hz)
     // Derived from ITU-R BS.1770-4 specification
@@ -973,7 +973,7 @@ void GoldCompProcessor::computeKWeightingCoeffs(double sampleRate)
     }
 }
 
-float GoldCompProcessor::applyBiquad(float x, BiquadState& s, const BiquadCoeffs& c)
+float SmartCompProcessor::applyBiquad(float x, BiquadState& s, const BiquadCoeffs& c)
 {
     float y = c.b0 * x + c.b1 * s.x1 + c.b2 * s.x2 - c.a1 * s.y1 - c.a2 * s.y2;
     s.x2 = s.x1; s.x1 = x;

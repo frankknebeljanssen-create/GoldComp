@@ -5,11 +5,11 @@
 #include "DSP/RVoxCompressor.h"
 #include "DSP/LookaheadLimiter.h"
 
-class GoldCompProcessor : public juce::AudioProcessor
+class SmartCompProcessor : public juce::AudioProcessor
 {
 public:
-    GoldCompProcessor();
-    ~GoldCompProcessor() override;
+    SmartCompProcessor();
+    ~SmartCompProcessor() override;
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;
@@ -151,5 +151,5 @@ private:
     float rideEnvCoeff = 0.0f;          // ~3 sec time constant
     float rideOffsetSmoothCoeff = 0.0f; // ~0.5 sec for smooth knob movement
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(GoldCompProcessor)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SmartCompProcessor)
 };

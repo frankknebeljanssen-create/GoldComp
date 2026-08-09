@@ -27,7 +27,7 @@ namespace C {
 }
 
 // ============== LOOK AND FEEL ==============
-GoldCompEditor::GoldCompLookAndFeel::GoldCompLookAndFeel()
+SmartCompEditor::SmartCompLookAndFeel::SmartCompLookAndFeel()
 {
     setColour(juce::Slider::rotarySliderFillColourId, C::accent);
     setColour(juce::Slider::rotarySliderOutlineColourId, C::well);
@@ -35,11 +35,11 @@ GoldCompEditor::GoldCompLookAndFeel::GoldCompLookAndFeel()
     setColour(juce::TextButton::textColourOffId, C::label);
 }
 
-void GoldCompEditor::GoldCompLookAndFeel::drawButtonBackground(juce::Graphics& g, juce::Button& btn, const juce::Colour&, bool, bool)
+void SmartCompEditor::SmartCompLookAndFeel::drawButtonBackground(juce::Graphics& g, juce::Button& btn, const juce::Colour&, bool, bool)
 {
     if (btn.getButtonText() == "MATCH") {
         auto b = btn.getLocalBounds().toFloat();
-        auto* editor = dynamic_cast<GoldCompEditor*>(btn.getParentComponent());
+        auto* editor = dynamic_cast<SmartCompEditor*>(btn.getParentComponent());
         bool matchOn = editor ? editor->processor.gainMatchEnabled.load() : false;
         g.setColour(matchOn ? C::accent.withAlpha(0.12f) : C::card);
         g.fillRoundedRectangle(b, 5.0f);
@@ -49,7 +49,7 @@ void GoldCompEditor::GoldCompLookAndFeel::drawButtonBackground(juce::Graphics& g
     }
 }
 
-void GoldCompEditor::GoldCompLookAndFeel::drawToggleButton(juce::Graphics& g, juce::ToggleButton& btn, bool over, bool down)
+void SmartCompEditor::SmartCompLookAndFeel::drawToggleButton(juce::Graphics& g, juce::ToggleButton& btn, bool over, bool down)
 {
     auto b = btn.getLocalBounds().toFloat().reduced(2);
     bool on = btn.getToggleState();
@@ -60,7 +60,7 @@ void GoldCompEditor::GoldCompLookAndFeel::drawToggleButton(juce::Graphics& g, ju
 }
 
 // Small knobs — matching big knob design (knurled edge, dome body, teal arc, pointer dot)
-void GoldCompEditor::GoldCompLookAndFeel::drawRotarySlider(
+void SmartCompEditor::SmartCompLookAndFeel::drawRotarySlider(
     juce::Graphics& g, int x, int y, int width, int height,
     float sliderPos, float rotaryStartAngle, float rotaryEndAngle, juce::Slider& slider)
 {
@@ -207,7 +207,7 @@ void GoldCompEditor::GoldCompLookAndFeel::drawRotarySlider(
 }
 
 // ============== EDITOR CONSTRUCTOR ==============
-GoldCompEditor::GoldCompEditor(GoldCompProcessor& p)
+SmartCompEditor::SmartCompEditor(SmartCompProcessor& p)
     : AudioProcessorEditor(&p), processor(p)
 {
     setLookAndFeel(&goldLNF);
@@ -324,9 +324,9 @@ GoldCompEditor::GoldCompEditor(GoldCompProcessor& p)
     startTimerHz(60);
 }
 
-GoldCompEditor::~GoldCompEditor() { setLookAndFeel(nullptr); stopTimer(); }
+SmartCompEditor::~SmartCompEditor() { setLookAndFeel(nullptr); stopTimer(); }
 
-void GoldCompEditor::loadPreset(int index)
+void SmartCompEditor::loadPreset(int index)
 {
     currentPreset = index;
     auto& pr = presets[(size_t)index];
@@ -338,11 +338,11 @@ void GoldCompEditor::loadPreset(int index)
     repaint();
 }
 
-void GoldCompEditor::saveUserPreset()
+void SmartCompEditor::saveUserPreset()
 {
     auto fc = std::make_shared<juce::FileChooser>("Save Preset",
-        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("GoldComp Presets"),
-        "*.gcpreset");
+        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("SmartComp Presets"),
+        "*.scpreset");
     fc->launchAsync(juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles,
         [this, fc](const juce::FileChooser& chooser) {
             auto file = chooser.getResult();
@@ -355,11 +355,11 @@ void GoldCompEditor::saveUserPreset()
         });
 }
 
-void GoldCompEditor::loadUserPreset()
+void SmartCompEditor::loadUserPreset()
 {
     auto fc = std::make_shared<juce::FileChooser>("Load Preset",
-        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("GoldComp Presets"),
-        "*.gcpreset");
+        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("SmartComp Presets"),
+        "*.scpreset");
     fc->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
         [this, fc](const juce::FileChooser& chooser) {
             auto file = chooser.getResult();
@@ -375,7 +375,7 @@ void GoldCompEditor::loadUserPreset()
 }
 
 // ============== TIMER ==============
-void GoldCompEditor::timerCallback()
+void SmartCompEditor::timerCallback()
 {
     auto bal = [](float& c, float t) { c = (t > c) ? c * 0.3f + t * 0.7f : c * 0.88f + t * 0.12f; };
     bal(displayGR, processor.compGainReductionDB.load());
@@ -470,7 +470,7 @@ void GoldCompEditor::timerCallback()
 }
 
 // ============== MOUSE ==============
-void GoldCompEditor::mouseDown(const juce::MouseEvent& e)
+void SmartCompEditor::mouseDown(const juce::MouseEvent& e)
 {
     auto bp = unscalePt(e.getPosition());  // base-coordinate mouse position
 
@@ -534,17 +534,17 @@ void GoldCompEditor::mouseDown(const juce::MouseEvent& e)
     }
 }
 
-void GoldCompEditor::mouseDrag(const juce::MouseEvent&) {}
+void SmartCompEditor::mouseDrag(const juce::MouseEvent&) {}
 
-void GoldCompEditor::mouseUp(const juce::MouseEvent&)
+void SmartCompEditor::mouseUp(const juce::MouseEvent&)
 {
     displayDragParam = "";
 }
 
-void GoldCompEditor::mouseDoubleClick(const juce::MouseEvent&) {}
+void SmartCompEditor::mouseDoubleClick(const juce::MouseEvent&) {}
 
 // ============== CENTRALIZED LAYOUT ==============
-void GoldCompEditor::recalcLayout()
+void SmartCompEditor::recalcLayout()
 {
     L.w = BASE_W;
     L.headerH = 48;
@@ -579,7 +579,7 @@ void GoldCompEditor::recalcLayout()
     L.readoutX = L.w - 16 - 10 - 46;
 }
 
-void GoldCompEditor::paint(juce::Graphics& g)
+void SmartCompEditor::paint(juce::Graphics& g)
 {
     recalcLayout();
     float s = getScale();
@@ -608,24 +608,30 @@ void GoldCompEditor::paint(juce::Graphics& g)
     }
     g.setColour(C::border); g.fillRect(0, headerH - 1, w, 1);
 
-    // Logo block — GOLDCOMP / bar / tagline — right edge aligned
+    // Logo block — SMARTCOMP / bar / tagline
     {
         int logoX = 16;
         int logoY = (headerH - 36) / 2;
-        
-        // Measure tagline width to align everything
-        int blockW = 130;
+
+        // Widths are measured rather than hardcoded, so the two halves stay
+        // flush and the GR bar underneath matches the wordmark exactly whatever
+        // the name is. They used to be fixed at 54/53/107, tuned by hand for
+        // "GOLD".
+        juce::Font logoFont("Arial", 20.0f, juce::Font::bold);
+        const int wA = (int)std::ceil(logoFont.getStringWidthFloat(LOGO_A));
+        const int wB = (int)std::ceil(logoFont.getStringWidthFloat(LOGO_B));
+
+        int blockW = wA + wB + 6;
         logoRect = juce::Rectangle<int>(logoX, logoY, blockW, 36);
 
-        // GOLD COMP — 20% larger (17→20pt)
-        g.setFont(juce::Font("Arial", 20.0f, juce::Font::bold));
+        g.setFont(logoFont);
         g.setColour(C::accent);
-        g.drawText("GOLD", logoX, logoY - 1, 54, 20, juce::Justification::centredLeft);
+        g.drawText(LOGO_A, logoX, logoY - 1, wA + 2, 20, juce::Justification::centredLeft);
         g.setColour(C::white);
-        g.drawText("COMP", logoX + 53, logoY - 1, 54, 20, juce::Justification::centredLeft);
+        g.drawText(LOGO_B, logoX + wA, logoY - 1, wB + 2, 20, juce::Justification::centredLeft);
 
-        // GR meter bar — flush with P of COMP at 20pt
-        float logoBarW = 107.0f;
+        // GR meter bar — spans the wordmark
+        float logoBarW = (float)(wA + wB);
         float logoGR = juce::jlimit(0.0f, 1.0f, displayGR / 24.0f);
         float logoFillW = logoBarW * (1.0f - logoGR);
         g.setColour(C::well); g.fillRoundedRectangle((float)logoX, (float)(logoY + 20), logoBarW, 2.0f, 1.0f);
@@ -1205,7 +1211,7 @@ void GoldCompEditor::paint(juce::Graphics& g)
 }
 
 // ============== INFO OVERLAY ==============
-void GoldCompEditor::setControlsInteractive(bool on)
+void SmartCompEditor::setControlsInteractive(bool on)
 {
     for (auto* s : { &compSlider, &gateSlider, &gainSlider, &hpfSlider,
                      &clipSlider, &mixSlider, &inTrimSlider, &scHpfSlider })
@@ -1214,7 +1220,7 @@ void GoldCompEditor::setControlsInteractive(bool on)
 }
 
 // Painted after child components so it covers the knobs (In Trim, Mix, Out).
-void GoldCompEditor::paintOverChildren(juce::Graphics& g)
+void SmartCompEditor::paintOverChildren(juce::Graphics& g)
 {
     if (!showInfo) return;
 
@@ -1229,8 +1235,8 @@ void GoldCompEditor::paintOverChildren(juce::Graphics& g)
     g.setColour(C::border); g.drawRoundedRectangle(oc, 8.0f, 1.0f);
     float cy = oc.getY() + 16;
     g.setFont(juce::Font("Arial", 20.0f, juce::Font::bold));
-    g.setColour(C::accent); g.drawText("GOLD", (int)oc.getX(), (int)cy, (int)oc.getWidth(), 20, juce::Justification::centred);
-    g.setColour(C::white); g.drawText("COMP", (int)oc.getX(), (int)(cy + 24), (int)oc.getWidth(), 20, juce::Justification::centred);
+    g.setColour(C::accent); g.drawText(LOGO_A, (int)oc.getX(), (int)cy, (int)oc.getWidth(), 20, juce::Justification::centred);
+    g.setColour(C::white); g.drawText(LOGO_B, (int)oc.getX(), (int)(cy + 24), (int)oc.getWidth(), 20, juce::Justification::centred);
     g.setFont(juce::Font("Arial", 11.0f, juce::Font::plain)); g.setColour(C::label);
     g.drawText("Frank Knebel-Janssen", (int)oc.getX(), (int)(cy + 60), (int)oc.getWidth(), 14, juce::Justification::centred);
     g.setColour(C::dim);
@@ -1240,7 +1246,7 @@ void GoldCompEditor::paintOverChildren(juce::Graphics& g)
 }
 
 // ============== BIG KNOB ==============
-void GoldCompEditor::drawBigKnob(juce::Graphics& g, int cx, int cy, int radius, float normVal, float grDB)
+void SmartCompEditor::drawBigKnob(juce::Graphics& g, int cx, int cy, int radius, float normVal, float grDB)
 {
     float startAngle = -2.356f; // -135 deg
     float endAngle = 2.356f;    // +135 deg
@@ -1602,7 +1608,7 @@ void GoldCompEditor::drawBigKnob(juce::Graphics& g, int cx, int cy, int radius, 
 }
 
 // ============== METER ==============
-void GoldCompEditor::drawMeter(juce::Graphics& g, int x, int y, int w, int h, float level, float peak)
+void SmartCompEditor::drawMeter(juce::Graphics& g, int x, int y, int w, int h, float level, float peak)
 {
     g.setColour(C::shadow);
     g.fillRoundedRectangle((float)x - 1, (float)y - 1, (float)w + 2, (float)h + 2, 3.5f);
@@ -1629,7 +1635,7 @@ void GoldCompEditor::drawMeter(juce::Graphics& g, int x, int y, int w, int h, fl
 }
 
 // ============== GR TIMELINE ==============
-void GoldCompEditor::drawGRTimeline(juce::Graphics& g, juce::Rectangle<int> area)
+void SmartCompEditor::drawGRTimeline(juce::Graphics& g, juce::Rectangle<int> area)
 {
     int x = area.getX(), y = area.getY(), w = area.getWidth(), h = area.getHeight();
     int padTop = 12, padBot = 4, scaleW = 30;
@@ -1866,7 +1872,7 @@ void GoldCompEditor::drawGRTimeline(juce::Graphics& g, juce::Rectangle<int> area
 }
 
 // ============== RESIZED ==============
-void GoldCompEditor::resized()
+void SmartCompEditor::resized()
 {
     recalcLayout();
     float s = getScale();
@@ -1939,7 +1945,7 @@ void GoldCompEditor::resized()
 
 // ============== A/B COMPARISON ==============
 // ============== TOOLTIP INFO ==============
-GoldCompEditor::TooltipInfo GoldCompEditor::getTooltipFor(const juce::String& el)
+SmartCompEditor::TooltipInfo SmartCompEditor::getTooltipFor(const juce::String& el)
 {
     if (el == "comp") return {
         "Compression",
@@ -2088,11 +2094,11 @@ GoldCompEditor::TooltipInfo GoldCompEditor::getTooltipFor(const juce::String& el
         "Factory presets for quick starting points.",
         "Init | Dialog | Vocal | Broadcast | Parallel | Destroy"
     };
-    if (el == "save") return { "Save Preset", "Save current settings as .gcpreset file.", "" };
-    if (el == "load") return { "Load Preset", "Load a .gcpreset file.", "" };
+    if (el == "save") return { "Save Preset", "Save current settings as .scpreset file.", "" };
+    if (el == "load") return { "Load Preset", "Load a .scpreset file.", "" };
     return { "", "", "" };
 }
 
 // ============== MOUSE MOVE / EXIT ==============
-void GoldCompEditor::mouseMove(const juce::MouseEvent&) {}
-void GoldCompEditor::mouseExit(const juce::MouseEvent&) {}
+void SmartCompEditor::mouseMove(const juce::MouseEvent&) {}
+void SmartCompEditor::mouseExit(const juce::MouseEvent&) {}
