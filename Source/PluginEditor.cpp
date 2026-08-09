@@ -193,7 +193,7 @@ void SmartCompEditor::SmartCompLookAndFeel::drawRotarySlider(
     juce::String name = slider.getName();
     g.setFont(juce::Font("Arial", 11.0f, juce::Font::plain));
     g.setColour(C::white);
-    if (name == "HP Filter" || name == "SC HPF") {
+    if (name == "HP Filter" || name == "SC HPF" || name == "Soft Clip") {
         g.drawText(val < 1 ? "OFF" : juce::String(val), x, y, width, height, juce::Justification::centred);
     } else if (name == "Gate") {
         g.drawText(val <= -79 ? "OFF" : juce::String(val), x, y, width, height, juce::Justification::centred);
@@ -217,16 +217,6 @@ SmartCompEditor::SmartCompEditor(SmartCompProcessor& p)
     getConstrainer()->setMinimumWidth(BASE_W * 3 / 4);    // 0.75x
     getConstrainer()->setMaximumWidth(BASE_W * 2);          // 2.0x
 
-    // Presets
-    presets = {
-        //                     comp gain hpf  clip mix  intensity  color              gate
-        { "Init",       0,  0,   0,  0, 100, 0.0f,  C::dim,     -80 },
-        { "Dialog",    10,  0,  80,  0, 100, 0.28f, C::accent,   -45 },
-        { "Vocal",     16,  0,  60,  0, 100, 0.44f, C::accent,   -50 },
-        { "Broadcast", 24,  0, 100,  0, 100, 0.67f, C::clipCol,  -40 },
-        { "Parallel",  20,  0,  60,  0,  50, 0.56f, C::clipCol,  -80 },
-        { "Destroy",   36,  0,   0,  0, 100, 1.0f,  C::gr,       -80 },
-    };
 
     // Setup all sliders as rotary
     auto setup = [&](juce::Slider& s, juce::Label& l, const juce::String& name, const juce::String& lbl) {
@@ -270,7 +260,6 @@ SmartCompEditor::SmartCompEditor(SmartCompProcessor& p)
     setup(inTrimSlider, inTrimLabel, "In Trim", "IN TRIM");
     setup(gainSlider, gainLabel, "Gain", "OUT GAIN");
     setup(hpfSlider, hpfLabel, "HP Filter", "HPF");
-    setup(clipSlider, clipLabel, "Soft Clip", "CLIP");
     setup(mixSlider, mixLabel, "Mix", "MIX");
 
     // Double-click reset
@@ -289,7 +278,6 @@ SmartCompEditor::SmartCompEditor(SmartCompProcessor& p)
     clipAttach  = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.apvts, "clip",  clipSlider);
     mixAttach   = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.apvts, "mix",   mixSlider);
 
-    clipSlider.setVisible(false); clipLabel.setVisible(false);
 
     // Bypass
     bypassBtn.setName("Bypass");
@@ -317,6 +305,9 @@ SmartCompEditor::SmartCompEditor(SmartCompProcessor& p)
     setupAdv(gateSlider, gateLabel, "Gate", "GATE");
     gateSlider.setDoubleClickReturnValue(true, -80.0f);
 
+    setupAdv(clipSlider, clipLabel, "Soft Clip", "CLIP");
+    clipSlider.setDoubleClickReturnValue(true, 0.0f);
+
     setupAdv(scHpfSlider, scHpfLabel, "SC HPF", "SC HPF");
     scHpfAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.apvts, "schpf", scHpfSlider);
     scHpfSlider.setDoubleClickReturnValue(true, 0.0f);
@@ -325,54 +316,6 @@ SmartCompEditor::SmartCompEditor(SmartCompProcessor& p)
 }
 
 SmartCompEditor::~SmartCompEditor() { setLookAndFeel(nullptr); stopTimer(); }
-
-void SmartCompEditor::loadPreset(int index)
-{
-    currentPreset = index;
-    auto& pr = presets[(size_t)index];
-    auto set = [&](const juce::String& id, float v) {
-        processor.apvts.getParameter(id)->setValueNotifyingHost(processor.apvts.getParameterRange(id).convertTo0to1(v));
-    };
-    set("comp", pr.comp); set("gain", pr.gain); set("hpf", pr.hpf);
-    set("clip", pr.clip); set("mix", pr.mix); set("gate", pr.gate);
-    repaint();
-}
-
-void SmartCompEditor::saveUserPreset()
-{
-    auto fc = std::make_shared<juce::FileChooser>("Save Preset",
-        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("SmartComp Presets"),
-        "*.scpreset");
-    fc->launchAsync(juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles,
-        [this, fc](const juce::FileChooser& chooser) {
-            auto file = chooser.getResult();
-            if (file != juce::File()) {
-                file.getParentDirectory().createDirectory();
-                auto state = processor.apvts.copyState();
-                auto xml = state.createXml();
-                if (xml) xml->writeTo(file);
-            }
-        });
-}
-
-void SmartCompEditor::loadUserPreset()
-{
-    auto fc = std::make_shared<juce::FileChooser>("Load Preset",
-        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("SmartComp Presets"),
-        "*.scpreset");
-    fc->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
-        [this, fc](const juce::FileChooser& chooser) {
-            auto file = chooser.getResult();
-            if (file != juce::File()) {
-                auto xml = juce::XmlDocument::parse(file);
-                if (xml) {
-                    auto state = juce::ValueTree::fromXml(*xml);
-                    if (state.isValid())
-                        processor.apvts.replaceState(state);
-                }
-            }
-        });
-}
 
 // ============== TIMER ==============
 void SmartCompEditor::timerCallback()
@@ -421,6 +364,8 @@ void SmartCompEditor::timerCallback()
         hpfLabel.setText(hpfVal < 1.0f ? "OFF" : "Hz", juce::dontSendNotification);
         float scHpfVal = processor.apvts.getRawParameterValue("schpf")->load();
         scHpfLabel.setText(scHpfVal < 1.0f ? "OFF" : "Hz", juce::dontSendNotification);
+        float clipVal = processor.apvts.getRawParameterValue("clip")->load();
+        clipLabel.setText(clipVal < 1.0f ? "OFF" : "%", juce::dontSendNotification);
     }
 
     // Tooltip hover detection in timer (works over child components)
@@ -439,20 +384,9 @@ void SmartCompEditor::timerCallback()
             else if (scHpfSlider.isVisible() && scHpfSlider.getBounds().contains(p)) hoveredElement = "schpf";
             else if (honestBtnRect.contains(bp)) hoveredElement = "true";
             else if (rideRect.contains(bp)) hoveredElement = "ride";
-            else if (saveBtnRect.contains(bp)) hoveredElement = "save";
-            else if (loadBtnRect.contains(bp)) hoveredElement = "load";
-            else if (clipPillRect.contains(bp)) hoveredElement = "clip";
             else if (advToggleRect.contains(bp)) hoveredElement = "adv";
             else if (grBarRect.contains(bp)) hoveredElement = "gr";
             else if (grTimelineRect.contains(bp)) hoveredElement = "grtimeline";
-            else {
-                for (int i = 0; i < (int)presetRects.size(); ++i) {
-                    if (presetRects[(size_t)i].contains(bp)) {
-                        hoveredElement = "preset_" + juce::String(i);
-                        break;
-                    }
-                }
-            }
         }
     } else {
         hoveredElement = "";
@@ -498,24 +432,6 @@ void SmartCompEditor::mouseDown(const juce::MouseEvent& e)
     // GR Timeline speed toggle
     if (grSpeedToggleRect.contains(bp)) {
         grTimelineFast = !grTimelineFast;
-        repaint(); return;
-    }
-
-    // Presets
-    for (int i = 0; i < (int)presetRects.size(); ++i) {
-        if (presetRects[(size_t)i].contains(bp)) { loadPreset(i); return; }
-    }
-
-    // Save/Load user presets
-    if (saveBtnRect.contains(bp)) { saveUserPreset(); return; }
-    if (loadBtnRect.contains(bp)) { loadUserPreset(); return; }
-
-    // CLIP toggle
-    if (clipPillRect.contains(bp)) {
-        float cur = processor.apvts.getRawParameterValue("clip")->load();
-        float newVal = cur > 1.0f ? 0.0f : 15.0f;
-        processor.apvts.getParameter("clip")->setValueNotifyingHost(
-            processor.apvts.getParameterRange("clip").convertTo0to1(newVal));
         repaint(); return;
     }
 
@@ -647,24 +563,6 @@ void SmartCompEditor::paint(juce::Graphics& g)
         g.drawText("confidence compressor", logoX, logoY + 24, blockW, 13, juce::Justification::centredLeft);
     }
 
-    // Preset name center + save/load icons — vertically centered
-    int presetNameCx = w / 2;
-    int headerMidY = headerH / 2;
-    g.setFont(juce::Font("Arial", 12.0f, juce::Font::plain));
-    g.setColour(C::label);
-    g.drawText(presets[(size_t)currentPreset].name, presetNameCx - 40, 0, 80, headerH, juce::Justification::centred);
-
-    // Save preset (↓ icon, left of name) — centered
-    saveBtnRect = juce::Rectangle<int>(presetNameCx - 60, headerMidY - 8, 16, 16);
-    g.setFont(juce::Font("Arial", 13.0f, juce::Font::plain));
-    g.setColour(C::label);
-    g.drawText(juce::CharPointer_UTF8("\xe2\x86\x93"), saveBtnRect, juce::Justification::centred);
-
-    // Load preset (↑ icon, right of name) — centered
-    loadBtnRect = juce::Rectangle<int>(presetNameCx + 44, headerMidY - 8, 16, 16);
-    g.setColour(C::label);
-    g.drawText(juce::CharPointer_UTF8("\xe2\x86\x91"), loadBtnRect, juce::Justification::centred);
-
     // === MAIN CONTENT ===
     int contentCx = L.contentCx;
     int meterH = L.meterH, meterW = L.meterW, meterGap = L.meterGap;
@@ -696,13 +594,18 @@ void SmartCompEditor::paint(juce::Graphics& g)
         int rideH = L.meterH;
         float rideCenterY = (float)rideTop + (float)rideH * 0.5f;
 
-        // Hit rect (for click toggle)
-        rideRect = juce::Rectangle<int>(rideX - 2, rideTop - 16, rideW + 4, rideH + 30);
-
-        // Label
-        g.setFont(juce::Font("Arial", 11.0f, juce::Font::bold));
-        g.setColour(isRide ? juce::Colour(0xff50c050) : C::label);
-        g.drawText("AUTO", rideX - 4, rideTop - 24, rideW + 8, 12, juce::Justification::centred);
+        // AUTO is a real button, not a clickable meter. Toggling a mode by
+        // clicking its readout is not something a user discovers on their own,
+        // and this is the plugin's headline feature — it has to look switchable.
+        const juce::Colour rideOn(0xff50c050);
+        rideRect = juce::Rectangle<int>(rideX - 6, rideTop - 26, rideW + 12, 18);
+        g.setColour(isRide ? rideOn.withAlpha(0.22f) : juce::Colour(0xff1e2330));
+        g.fillRoundedRectangle(rideRect.toFloat(), 4.0f);
+        g.setColour(isRide ? rideOn.withAlpha(0.75f) : juce::Colour(0xff444a58));
+        g.drawRoundedRectangle(rideRect.toFloat(), 4.0f, 1.0f);
+        g.setFont(juce::Font("Arial", 10.0f, juce::Font::bold));
+        g.setColour(isRide ? rideOn : C::label);
+        g.drawText("AUTO", rideRect, juce::Justification::centred);
 
         // Background bar
         g.setColour(juce::Colour(0xff0d0f14));
@@ -887,13 +790,26 @@ void SmartCompEditor::paint(juce::Graphics& g)
         g.setColour(trueOn ? C::accent.withAlpha(0.35f) : C::border);
         g.drawRoundedRectangle((float)trueX, (float)trueCardY, (float)trueW, (float)trueCardH, 4.0f, 1.0f);
 
-        // TRUE label — left inside
+        // TRUE label + an explicit switch, for the same reason as AUTO above:
+        // the card used to toggle on click with nothing indicating it could.
         g.setFont(juce::Font("Arial", 10.0f, juce::Font::bold));
         g.setColour(trueOn ? C::accent : inactiveCol);
         g.drawText("TRUE LEVEL", trueX + 6, trueCardY, 68, trueCardH, juce::Justification::centredLeft);
 
+        {
+            auto sw = juce::Rectangle<float>((float)(trueX + 74), (float)trueCardY + 6.0f, 26.0f, 12.0f);
+            g.setColour(trueOn ? C::accent.withAlpha(0.30f) : juce::Colour(0xff1e2330));
+            g.fillRoundedRectangle(sw, 6.0f);
+            g.setColour(trueOn ? C::accent.withAlpha(0.75f) : juce::Colour(0xff444a58));
+            g.drawRoundedRectangle(sw, 6.0f, 1.0f);
+            // Knob slides right when on — reads as a switch at a glance
+            float kx = trueOn ? sw.getRight() - 10.0f : sw.getX() + 2.0f;
+            g.setColour(trueOn ? C::accent : inactiveCol);
+            g.fillEllipse(kx, sw.getY() + 2.0f, 8.0f, 8.0f);
+        }
+
         // Inner meter area
-        int innerX = trueX + 76;
+        int innerX = trueX + 108;
         int innerRight = trueX + trueW - 52;
         int innerW = innerRight - innerX;
         int innerY = trueCardY + 5;
@@ -967,32 +883,28 @@ void SmartCompEditor::paint(juce::Graphics& g)
 
     }
 
-    // CLIP + DE-CLICK buttons — right side, stacked
+    // CLIP activity indicator. Read-only now: the amount is a knob in the ADV
+    // panel, because the pill toggled a hardcoded 15% that measured 0.22 dB of
+    // peak reduction — a control that promised something it did not deliver.
     {
         bool clipOn = processor.apvts.getRawParameterValue("clip")->load() > 1.0f;
-        int pillW2 = 46, pillH2 = 20;
-        int pillX2 = w - 16 - 12 - pillW2;
-        // Single pill now that D-CLK is gone, so centre it on the knob row
-        int pillY2 = kcY + (kcH - pillH2) / 2 + 6;
-
-        // CLIP
-        float clipAct = clipOn ? processor.clipActivity.load() : 0.0f;
-        clipPillRect = juce::Rectangle<int>(pillX2, pillY2, pillW2, pillH2);
-        g.setColour(clipOn ? C::clipCol.withAlpha(0.15f + clipAct * 0.35f) : juce::Colour(0xff1e2330));
-        g.fillRoundedRectangle(clipPillRect.toFloat(), 5.0f);
-        g.setColour(clipOn ? C::clipCol.withAlpha(0.5f + clipAct * 0.4f) : juce::Colour(0xff444a58));
-        g.drawRoundedRectangle(clipPillRect.toFloat(), 5.0f, clipAct > 0.1f ? 1.5f : 1.0f);
-        if (clipAct > 0.05f) {
-            g.setColour(C::clipCol.withAlpha(clipAct * 0.2f));
-            g.drawRoundedRectangle(clipPillRect.toFloat().expanded(2.0f), 7.0f, 2.0f);
+        if (clipOn) {
+            float clipAct = processor.clipActivity.load();
+            int dotW = 46, dotH = 20;
+            int dotX = w - 16 - 12 - dotW;
+            int dotY = kcY + (kcH - dotH) / 2 + 6;
+            auto r = juce::Rectangle<float>((float)dotX, (float)dotY, (float)dotW, (float)dotH);
+            g.setColour(C::clipCol.withAlpha(0.12f + clipAct * 0.35f));
+            g.fillRoundedRectangle(r, 5.0f);
+            g.setColour(C::clipCol.withAlpha(0.4f + clipAct * 0.4f));
+            g.drawRoundedRectangle(r, 5.0f, clipAct > 0.1f ? 1.5f : 1.0f);
+            g.setFont(juce::Font("Arial", 9.0f, juce::Font::bold));
+            g.setColour(C::clipCol);
+            g.drawText("CLIP", r, juce::Justification::centred);
         }
-        g.setFont(juce::Font("Arial", 9.0f, juce::Font::bold));
-        g.setColour(clipOn ? C::clipCol : C::label);
-        g.drawText("CLIP", clipPillRect, juce::Justification::centred);
     }
 
     // === GR TIMELINE + ADV PANEL (both inside collapsible ADV) ===
-    presetRects.clear();
     grTimelineRect = {};
     grSpeedToggleRect = {};
 
@@ -1011,7 +923,7 @@ void SmartCompEditor::paint(juce::Graphics& g)
         }
         drawGRTimeline(g, juce::Rectangle<int>(16, tlY, tlW, tlH));
 
-        // Presets + knobs panel below timeline
+        // ADV knobs panel below timeline
         int panelY = L.panelY;
         int panelH = L.panelH;
         auto panelR = juce::Rectangle<float>(16.0f, (float)panelY, (float)(w - 32), (float)panelH);
@@ -1021,35 +933,10 @@ void SmartCompEditor::paint(juce::Graphics& g)
 
         int panelInnerX = 24, panelInnerW = w - 48;
 
-        // Preset row
-        {
-            int numPresets = (int)presets.size();
-            int presetGap = 6;
-            int presetH = 22;
-            int presetTotalW = panelInnerW;
-            int presetW = (presetTotalW - (numPresets - 1) * presetGap) / numPresets;
-            int presetY = panelY + 12;
-            for (int i = 0; i < numPresets; ++i) {
-                int px = panelInnerX + i * (presetW + presetGap);
-                auto r = juce::Rectangle<int>(px, presetY, presetW, presetH);
-                presetRects.push_back(r);
-                bool active = (i == currentPreset);
-                g.setColour(active ? C::accent.withAlpha(0.22f) : juce::Colour(0xff1e2330));
-                g.fillRoundedRectangle(r.toFloat(), 5.0f);
-                g.setColour(active ? C::accent.withAlpha(0.65f) : juce::Colour(0xff444a58));
-                g.drawRoundedRectangle(r.toFloat(), 5.0f, 1.0f);
-                g.setFont(juce::Font("Arial", 11.0f, juce::Font::bold));
-                g.setColour(active ? C::accent : C::label.brighter(0.3f));
-                g.drawText(presets[(size_t)i].name, r, juce::Justification::centred);
-            }
-        }
-
-        // Knob area: vertically centered between presets bottom and panel bottom
+        // Knob area: centred in the panel now that the preset row is gone
         int knobSzAdv = 56;
-        int presetBottom = panelY + 34;  // preset row bottom
-        int availH = panelH - 34;        // space below presets
-        int knobBlockH = knobSzAdv + 2 + 14;  // knob + gap + label = 72
-        int knobTopY = presetBottom + (availH - knobBlockH) / 2 + 6;
+        int knobBlockH = knobSzAdv + 2 + 14;  // knob + gap + label
+        int knobTopY = panelY + (panelH - knobBlockH) / 2 + 6;
         int knobCenterY = knobTopY + knobSzAdv / 2;
 
         // Knob labels + knobs. The left 66px used to hold the Delta and A/B
@@ -1057,23 +944,26 @@ void SmartCompEditor::paint(juce::Graphics& g)
         int knobAreaLeft = panelInnerX + 8;
         int knobAreaRight = panelInnerX + panelInnerW;
         int knobAreaW2 = knobAreaRight - knobAreaLeft;
-        int col3W = knobAreaW2 / 3;
+        int colW = knobAreaW2 / 4;
         int row1Y = knobTopY;
         g.setFont(juce::Font("Arial", 10.0f, juce::Font::bold));
         g.setColour(C::label.brighter(0.3f));
-        g.drawText("GATE", knobAreaLeft, row1Y - 14, col3W, 12, juce::Justification::centred);
-        g.drawText("HPF", knobAreaLeft + col3W, row1Y - 14, col3W, 12, juce::Justification::centred);
-        g.drawText("SC HPF", knobAreaLeft + col3W * 2, row1Y - 14, col3W, 12, juce::Justification::centred);
+        g.drawText("GATE", knobAreaLeft, row1Y - 14, colW, 12, juce::Justification::centred);
+        g.drawText("HPF", knobAreaLeft + colW, row1Y - 14, colW, 12, juce::Justification::centred);
+        g.drawText("SC HPF", knobAreaLeft + colW * 2, row1Y - 14, colW, 12, juce::Justification::centred);
+        g.drawText("CLIP", knobAreaLeft + colW * 3, row1Y - 14, colW, 12, juce::Justification::centred);
 
         hpfSlider.setVisible(true); hpfLabel.setVisible(true);
         gateSlider.setVisible(true); gateLabel.setVisible(true);
         scHpfSlider.setVisible(true); scHpfLabel.setVisible(true);
+        clipSlider.setVisible(true); clipLabel.setVisible(true);
     }
     else
     {
         hpfSlider.setVisible(false); hpfLabel.setVisible(false);
         gateSlider.setVisible(false); gateLabel.setVisible(false);
         scHpfSlider.setVisible(false); scHpfLabel.setVisible(false);
+        clipSlider.setVisible(false); clipLabel.setVisible(false);
     }
 
     // === INFO BUTTON ===
@@ -1140,20 +1030,10 @@ void SmartCompEditor::paint(juce::Graphics& g)
             else if (hoveredElement == "schpf") elBounds = unscaleRect(scHpfSlider.getBounds());
             else if (hoveredElement == "true") elBounds = honestBtnRect;
             else if (hoveredElement == "ride") elBounds = rideRect;
-            else if (hoveredElement == "save") elBounds = saveBtnRect;
-            else if (hoveredElement == "load") elBounds = loadBtnRect;
-            else if (hoveredElement == "clip") elBounds = clipPillRect;
             else if (hoveredElement == "adv") elBounds = advToggleRect;
             else if (hoveredElement == "gr") elBounds = grBarRect;
             else if (hoveredElement == "grtimeline") elBounds = grTimelineRect;
             else if (hoveredElement == "vocalstate") elBounds = vocalStateRect;
-            else if (hoveredElement.startsWith("preset")) {
-                int pidx = hoveredElement.contains("_") ? hoveredElement.fromLastOccurrenceOf("_", false, false).getIntValue() : 0;
-                if (pidx >= 0 && pidx < (int)presetRects.size())
-                    elBounds = presetRects[(size_t)pidx];
-                else if (!presetRects.empty())
-                    elBounds = presetRects[0];
-            }
 
             // RULE: Tooltips must not overlap with JUCE slider components
             // (they render as children ON TOP of paint).
@@ -1200,13 +1080,10 @@ void SmartCompEditor::paint(juce::Graphics& g)
             g.drawText(text, r, juce::Justification::centred);
         };
 
-        bool clipOn2 = processor.apvts.getRawParameterValue("clip")->load() > 1.0f;
 
         // Left pills
         drawPill(advToggleRect, "ADV", advOpen, C::accent);
 
-        // Right pills
-        drawPill(clipPillRect, "CLIP", clipOn2, C::clipCol);
     }
 }
 
@@ -1909,6 +1786,7 @@ void SmartCompEditor::resized()
     if (!advOpen) {
         hpfSlider.setVisible(false); hpfLabel.setVisible(false);
         gateSlider.setVisible(false); gateLabel.setVisible(false);
+        clipSlider.setVisible(false); clipLabel.setVisible(false);
     }
 
     // ADV panel
@@ -1920,15 +1798,13 @@ void SmartCompEditor::resized()
         int knobAreaLeft = panelX + 8;
         int knobAreaRight = panelX + advPanelW;
         int knobAreaW2 = knobAreaRight - knobAreaLeft;
-        int col3W = knobAreaW2 / 3;
+        int colW = knobAreaW2 / 4;
 
-        int presetBottom = panelTopY + 34;
-        int availH = L.panelH - 34;
         int knobBlockH = advKnobSz + 2 + 14;
-        int knobTopY = presetBottom + (availH - knobBlockH) / 2 + 6;
+        int knobTopY = panelTopY + (L.panelH - knobBlockH) / 2 + 6;
 
         auto placeAdvKnob = [&](juce::Slider& sl, juce::Label& l, int col) {
-            int kx = knobAreaLeft + col * col3W + (col3W - advKnobSz) / 2;
+            int kx = knobAreaLeft + col * colW + (colW - advKnobSz) / 2;
             sl.setBounds(S(kx), S(knobTopY), S(advKnobSz), S(advKnobSz));
             l.setBounds(S(kx - 14), S(knobTopY + advKnobSz + 2), S(advKnobSz + 28), S(14));
         };
@@ -1936,10 +1812,12 @@ void SmartCompEditor::resized()
         placeAdvKnob(gateSlider, gateLabel, 0);
         placeAdvKnob(hpfSlider, hpfLabel, 1);
         placeAdvKnob(scHpfSlider, scHpfLabel, 2);
+        placeAdvKnob(clipSlider, clipLabel, 3);
 
         gateSlider.setVisible(true); gateLabel.setVisible(true);
         hpfSlider.setVisible(true); hpfLabel.setVisible(true);
         scHpfSlider.setVisible(true); scHpfLabel.setVisible(true);
+        clipSlider.setVisible(true); clipLabel.setVisible(true);
     }
 }
 
@@ -2051,9 +1929,8 @@ SmartCompEditor::TooltipInfo SmartCompEditor::getTooltipFor(const juce::String& 
     };
     if (el == "adv") return {
         "Advanced Panel",
-        "Additional controls: Input Trim, HPF, Sidechain HPF, "
-        "and factory presets.",
-        "All settings saved with presets and DAW session"
+        "Additional controls: Gate, HPF and Sidechain HPF.",
+        "All settings are saved with the DAW session"
     };
     if (el == "meters") return {
         "Level Meters",
@@ -2076,26 +1953,6 @@ SmartCompEditor::TooltipInfo SmartCompEditor::getTooltipFor(const juce::String& 
         "Detector-only: audio path is not filtered\n"
         "Typical: 80-120 Hz for vocals, 150-200 Hz for full mix"
     };
-    if (el.startsWith("preset_")) {
-        int idx = el.substring(7).getIntValue();
-        if (idx >= 0 && idx < (int)presets.size()) {
-            auto& pr = presets[(size_t)idx];
-            return {
-                pr.name,
-                "Click to load this preset. Sets compression, gate, HPF, and mix.",
-                "Comp: " + juce::String((int)pr.comp) + " dB | HPF: " + juce::String((int)pr.hpf) +
-                " Hz | Mix: " + juce::String((int)pr.mix) + "% | Gate: " +
-                juce::String((int)pr.gate) + " dB"
-            };
-        }
-    }
-    if (el.startsWith("preset")) return {
-        "Presets",
-        "Factory presets for quick starting points.",
-        "Init | Dialog | Vocal | Broadcast | Parallel | Destroy"
-    };
-    if (el == "save") return { "Save Preset", "Save current settings as .scpreset file.", "" };
-    if (el == "load") return { "Load Preset", "Load a .scpreset file.", "" };
     return { "", "", "" };
 }
 

@@ -36,17 +36,10 @@ public:
     juce::ToggleButton bypassBtn;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> bypassAttach;
 
-    struct Preset { juce::String name; float comp, gain, hpf, clip, mix, intensity; juce::Colour dotCol; float gate; };
-    std::vector<Preset> presets;
-    int currentPreset = 0;
-    void loadPreset(int index);
-    void saveUserPreset();
-    void loadUserPreset();
 
     juce::TextButton matchBtn;
     bool showInfo = false;
     juce::Rectangle<int> logoRect, infoBtnRect, advToggleRect;
-    juce::Rectangle<int> saveBtnRect, loadBtnRect;
     
     // Interactive compression display
     juce::Rectangle<int> compDisplayRect;
@@ -56,11 +49,9 @@ public:
 
     // HONEST mode button
     juce::Rectangle<int> honestBtnRect;
-    juce::Rectangle<int> clipPillRect;
     juce::Rectangle<int> grBarRect, grTimelineRect, vocalStateRect;
     bool grTimelineFast = false;  // false=slow (full history), true=fast (zoomed in)
     juce::Rectangle<int> grSpeedToggleRect;
-    std::vector<juce::Rectangle<int>> presetRects;
 
     void drawBigKnob(juce::Graphics& g, int cx, int cy, int radius, float normVal, float grDB);
     void drawMeter(juce::Graphics& g, int x, int y, int w, int h, float level, float peak);

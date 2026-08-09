@@ -85,6 +85,10 @@ public:
         processor->apvts.getParameter("comp")->setValueNotifyingHost(18.0f / 36.0f);
         processor->apvts.getParameter("mix")->setValueNotifyingHost(1.0f);
 
+        // AUTO on for the screenshot: it is the plugin's headline feature, and
+        // the button state is only meaningful if it is shown engaged.
+        processor->rideMode.store(true);
+
         editor.reset(processor->createEditor());
         editor->setVisible(true);
 
