@@ -750,6 +750,8 @@ void SmartCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mi
 
     compGainReductionDB.store(bypassed ? 0.0f : compressor.getGainReductionDB());
     limiterGainReductionDB.store(bypassed ? 0.0f : limiter.getGainReductionDB());
+    gateIsOpen.store(bypassed ? true : compressor.isGateOpen());
+    gateReductionDB.store(bypassed ? 0.0f : compressor.getGateReductionDB());
 }
 
 juce::AudioProcessorEditor* SmartCompProcessor::createEditor() { return new SmartCompEditor(*this); }

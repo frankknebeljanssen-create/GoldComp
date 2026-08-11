@@ -584,6 +584,31 @@ void SmartCompEditor::paint(juce::Graphics& g)
     drawMeter(g, meterX, meterY, meterW, meterH, displayInL, peakHoldInL);
     drawMeter(g, meterX + meterW + meterGap, meterY, meterW, meterH, displayInR, peakHoldInR);
 
+    // Gate threshold on the IN meter: signal below this line gets attenuated.
+    // Was previously a bare number in the ADV panel with no sense of where it
+    // sits relative to the signal actually passing through — this draws it on
+    // the meter the level itself is shown on, using the same dB-to-pixel
+    // mapping as drawMeter (n = (db+60)/60), so the line lines up exactly with
+    // the level it is judging.
+    {
+        float gateThreshDB = processor.apvts.getRawParameterValue("gate")->load();
+        if (gateThreshDB > -79.0f) {
+            float n = juce::jlimit(0.0f, 1.0f, (gateThreshDB + 60.0f) / 60.0f);
+            float lineY = (float)(meterY + meterH) - n * (float)meterH;
+            float meterSpanW = meterW * 2.0f + meterGap;
+
+            bool open = processor.gateIsOpen.load();
+            juce::Colour gateCol = open ? juce::Colour(0xff5dcaa5) : juce::Colour(0xffe0524a);
+
+            // Dim the region below threshold — this is the zone the gate cuts.
+            g.setColour(juce::Colours::black.withAlpha(0.35f));
+            g.fillRect((float)meterX, lineY + 1.0f, meterSpanW, (float)(meterY + meterH) - lineY - 1.0f);
+
+            g.setColour(gateCol.withAlpha(0.85f));
+            g.drawLine((float)meterX - 2.0f, lineY, (float)meterX + meterSpanW + 2.0f, lineY, 1.3f);
+        }
+    }
+
     // Scale labels for IN
     g.setFont(juce::Font("Arial", 10.0f, juce::Font::plain));
     for (float db : { 0.0f, -12.0f, -24.0f, -48.0f }) {
@@ -941,6 +966,82 @@ void SmartCompEditor::paint(juce::Graphics& g)
 
         gateSlider.setVisible(true); gateLabel.setVisible(true);
         scHpfSlider.setVisible(true); scHpfLabel.setVisible(true);
+
+        // Live gate state + SC HPF response curve. Slider bounds come back in
+        // scaled screen pixels from resized(); paint() draws in the unscaled
+        // base coordinate system, so divide out the scale to place things
+        // relative to the actual knobs rather than duplicating their layout math.
+        float uiScale = getScale();
+        auto unscale = [uiScale](juce::Rectangle<int> r) {
+            return juce::Rectangle<int>((int)(r.getX() / uiScale), (int)(r.getY() / uiScale),
+                                         (int)(r.getWidth() / uiScale), (int)(r.getHeight() / uiScale));
+        };
+
+        // GATE: a small readout next to the header text. The threshold itself
+        // is on the IN meter now (see above) — this just confirms live state,
+        // since the meter alone does not say how hard the gate is biting.
+        {
+            float gateThreshDB = processor.apvts.getRawParameterValue("gate")->load();
+            if (gateThreshDB > -79.0f) {
+                bool open = processor.gateIsOpen.load();
+                float redDB = processor.gateReductionDB.load();
+                juce::Colour col = open ? juce::Colour(0xff5dcaa5) : juce::Colour(0xffe0524a);
+                juce::String txt = open ? "open" : juce::String(redDB, 1) + " dB";
+
+                auto gr = unscale(gateSlider.getBounds());
+                int dotX = gr.getCentreX() - 22, dotY = row1Y - 10;
+                g.setColour(col);
+                g.fillEllipse((float)dotX, (float)dotY, 5.0f, 5.0f);
+                g.setFont(juce::Font("Arial", 9.0f, juce::Font::plain));
+                g.drawText(txt, dotX + 8, dotY - 4, 60, 12, juce::Justification::centredLeft);
+            }
+        }
+
+        // SC HPF: the cutoff frequency as a curve rather than a bare number —
+        // shows the shape of what is being kept out of the detector, not just
+        // where. Pure function of the schpf parameter; no new DSP metering.
+        {
+            float schpfHz = processor.apvts.getRawParameterValue("schpf")->load();
+            if (schpfHz > 0.5f) {
+                auto sr = unscale(scHpfSlider.getBounds());
+                int curveW = 74, curveH = 34;
+                int curveX = sr.getRight() + 10;
+                int curveY = sr.getCentreY() - curveH / 2;
+                if (curveX + curveW < knobAreaRight) {
+                    g.setColour(juce::Colour(0xff14171d));
+                    g.fillRoundedRectangle((float)curveX, (float)curveY, (float)curveW, (float)curveH, 3.0f);
+
+                    // 2nd-order Butterworth highpass magnitude response, analog
+                    // prototype: |H|^2 = (f/fc)^4 / (1 + (f/fc)^4). Illustrative
+                    // shape, not a bit-exact readout of the digital biquad —
+                    // matches it closely enough to show the slope and corner.
+                    juce::Path resp;
+                    const int steps = 24;
+                    for (int i = 0; i <= steps; ++i) {
+                        float logF = std::log10(20.0f) + (std::log10(2000.0f) - std::log10(20.0f)) * (float)i / steps;
+                        float f = std::pow(10.0f, logF);
+                        float ratio = f / schpfHz;
+                        float r4 = ratio * ratio * ratio * ratio;
+                        float magSq = r4 / (1.0f + r4);
+                        float db = 10.0f * std::log10(juce::jmax(magSq, 1.0e-6f));
+                        float xN = (float)i / steps;
+                        float yN = juce::jlimit(0.0f, 1.0f, (db + 24.0f) / 24.0f);
+                        float px = curveX + xN * curveW;
+                        float py = curveY + curveH - yN * curveH;
+                        if (i == 0) resp.startNewSubPath(px, py);
+                        else resp.lineTo(px, py);
+                    }
+                    g.setColour(juce::Colour(0xff6fb89c));
+                    g.strokePath(resp, juce::PathStrokeType(1.4f));
+
+                    // Cutoff marker
+                    float cutXN = (std::log10(schpfHz) - std::log10(20.0f)) / (std::log10(2000.0f) - std::log10(20.0f));
+                    float cutX = curveX + juce::jlimit(0.0f, 1.0f, cutXN) * curveW;
+                    g.setColour(juce::Colour(0xff6fb89c).withAlpha(0.5f));
+                    g.drawLine(cutX, (float)curveY, cutX, (float)(curveY + curveH), 0.7f);
+                }
+            }
+        }
     }
     else
     {

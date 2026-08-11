@@ -425,6 +425,10 @@ public:
     }
 
     float getGainReductionDB() const { return smoothGR; }
+    // Gate state, already computed internally but not previously exposed —
+    // needed to draw the threshold/attenuation on the IN meter.
+    bool isGateOpen() const { return gateOpen; }
+    float getGateReductionDB() const { return smoothExpanderGainDB; }
     int getLatencySamples() const { return lookahead; }
     const std::array<float, GR_HISTORY_SIZE>& getGRHistory() const { return grHistory; }
     int getGRHistoryWritePos() const { return grHistoryWritePos.load(std::memory_order_acquire); }

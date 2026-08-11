@@ -41,6 +41,8 @@ public:
     std::atomic<float> limiterGainReductionDB { 0.0f };
     std::atomic<float> outputPeakL { 0.0f }, outputPeakR { 0.0f };
     std::atomic<float> inputPeakL { 0.0f }, inputPeakR { 0.0f };
+    std::atomic<bool> gateIsOpen { true };
+    std::atomic<float> gateReductionDB { 0.0f };  // 0..-30, how hard the gate is currently attenuating
 
     // Gain match
     std::atomic<float> inputRMS { 0.0f };
