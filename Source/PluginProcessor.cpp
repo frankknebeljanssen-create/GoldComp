@@ -32,9 +32,6 @@ juce::AudioProcessorValueTreeState::ParameterLayout SmartCompProcessor::createPa
         juce::ParameterID("gain", 1), "Out Gain",
         juce::NormalisableRange<float>(-24.0f, 12.0f, 0.1f), 0.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("hpf", 1), "HP Filter",
-        juce::NormalisableRange<float>(0.0f, 300.0f, 1.0f, 0.4f), 0.0f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("schpf", 1), "SC HP Filter",
         juce::NormalisableRange<float>(0.0f, 400.0f, 1.0f, 0.4f), 0.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
@@ -61,12 +58,6 @@ void SmartCompProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     // 2x domain; only the coefficients were missed.
     compressor.prepare(sampleRate * compOSFactor, samplesPerBlock * compOSFactor);
     limiter.prepare(sampleRate, samplesPerBlock);   // limiter runs at base rate
-
-    juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32)samplesPerBlock, 2 };
-    // Allocate the coefficients object once, here, where allocation is allowed.
-    // processBlock then only ever writes into it in place.
-    sigHpFilter.state = juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, 100.0f);
-    sigHpFilter.prepare(spec); sigHpFilter.reset();
 
     // Integer latency: without this getLatencyInSamples() returns a fractional
     // group delay which the (int) cast below silently truncated, leaving the
@@ -99,12 +90,6 @@ void SmartCompProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     fadeFromR.assign((size_t)samplesPerBlock, 0.0f);
     monoScratch.assign((size_t)samplesPerBlock, 0.0f);
 
-    // Force the signal HPF to redesign its coefficients. Without this the knob
-    // deadband below keeps the *previous* sample rate's coefficients, so after a
-    // rate change a 300 Hz setting actually sits at 653 Hz (44.1k -> 96k) until
-    // the user happens to nudge the knob.
-    lastHpfFreq = -1.0f;
-
     // Ramp and filter state: initialised at construction but previously never
     // re-initialised here, so a re-prepare replayed stale gain and DC state.
     prevTrimLin = 1.0f;
@@ -113,7 +98,6 @@ void SmartCompProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     prevMixWet = 1.0f;
     prevOutTrimLin = 1.0f;
     smoothedMakeupGR = 0.0f;
-    smoothedHpfFreq = 0.0f;
     dcBlockL = dcBlockR = dcPrevInL = dcPrevInR = 0.0f;
     prevBypassed = false;
 
@@ -138,7 +122,6 @@ void SmartCompProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 void SmartCompProcessor::releaseResources()
 {
     compressor.reset(); limiter.reset();
-    sigHpFilter.reset();
     compOS.reset();
 }
 
@@ -155,27 +138,6 @@ bool SmartCompProcessor::isBusesLayoutSupported(const BusesLayout& layouts) cons
     // Never fewer output channels than input
     return inOK && outOK && out.size() >= in.size();
 }
-
-// Writes RBJ high-pass coefficients into an existing Coefficients object.
-// Allocation-free, so it is safe to call from processBlock.
-void SmartCompProcessor::setHighPassCoefficients(juce::dsp::IIR::Coefficients<float>& c,
-                                                double sampleRate, float freq)
-{
-    const double w0 = 2.0 * juce::MathConstants<double>::pi
-                    * juce::jlimit(1.0, sampleRate * 0.49, (double)freq) / sampleRate;
-    const double cosW0 = std::cos(w0);
-    const double alpha = std::sin(w0) / (2.0 * 0.70710678118654752);  // Q = 1/sqrt(2)
-    const double a0 = 1.0 + alpha;
-
-    // JUCE stores coefficients as { b0, b1, b2, a1, a2 }, already normalised by a0
-    auto& raw = c.coefficients;
-    raw.getReference(0) = (float)(((1.0 + cosW0) * 0.5) / a0);
-    raw.getReference(1) = (float)((-(1.0 + cosW0)) / a0);
-    raw.getReference(2) = raw.getReference(0);
-    raw.getReference(3) = (float)((-2.0 * cosW0) / a0);
-    raw.getReference(4) = (float)((1.0 - alpha) / a0);
-}
-
 
 void SmartCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
@@ -268,24 +230,9 @@ void SmartCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mi
     // permanent limiting. The ceiling is fixed just below full scale instead.
     float outTrimDB = apvts.getRawParameterValue("gain")->load();
     static constexpr float CEILING_DB = -0.3f;
-    float hpfFreq  = apvts.getRawParameterValue("hpf")->load();
     float scHpFreq = apvts.getRawParameterValue("schpf")->load();
     float mixAmt   = apvts.getRawParameterValue("mix")->load() / 100.0f;
     float inTrimDB = apvts.getRawParameterValue("inTrim")->load();
-
-    // Smooth the two parameters that otherwise change discontinuously at block
-    // boundaries: the HPF swaps coefficients on a stateful IIR, and Clip feeds
-    // both a waveshaper drive and a wet/dry blend. ~30 ms turns a sweep into a
-    // glide instead of a staircase.
-    {
-        const float pSmooth = std::exp(-(float)numSamples / (float)(currentSampleRate * 0.030));
-        smoothedHpfFreq = smoothedHpfFreq * pSmooth + hpfFreq * (1.0f - pSmooth);
-        if (! std::isfinite(smoothedHpfFreq)) smoothedHpfFreq = hpfFreq;
-        // Snap to the endpoints so "off" is really off and the top of the range
-        // is reachable
-        if (std::abs(hpfFreq - smoothedHpfFreq) < 0.05f) smoothedHpfFreq = hpfFreq;
-        hpfFreq = smoothedHpfFreq;
-    }
 
     // Input metering + K-weighted LUFS
     float inPL = 0, inPR = 0, inKSumSq = 0;
@@ -477,17 +424,31 @@ void SmartCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mi
             rideSmoothedInit = true;
         }
 
-        // Asymmetric: move up quickly when the material needs more compression,
-        // ease down slowly so a breath or a pause does not make it back off.
-        const float direction = target - rideSmoothedComp;
-        float smoothTime;
-        if (direction > 0.2f)       smoothTime = 0.10f;   // needs more comp — follow fast
-        else if (direction < -0.2f) smoothTime = 0.40f;   // could be a pause — hold
-        else                        smoothTime = 0.15f;   // near target — gentle
+        if (compKnobDragging.load()) {
+            // Pin the internal state to the live knob while the user is actively
+            // moving it. Without this it kept gliding toward the sweet spot in
+            // the background for the whole duration of the drag, so by release
+            // time it had often already arrived — the visible "spring back" was
+            // really just the editor syncing to a value that finished converging
+            // silently, which read as an instant snap rather than a glide.
+            rideSmoothedComp = juce::jlimit(0.0f, 36.0f, -compDB);
+        } else {
+            // Asymmetric: move up quickly when the material needs more
+            // compression, ease down slowly — both for a breath/pause not to
+            // back it off, and so the return after a manual drag is a visible
+            // glide rather than a jump. 0.4s was too close to instant-looking
+            // once the drag-time convergence bug above was fixed; 0.9s takes
+            // about 2.5s to look fully settled.
+            const float direction = target - rideSmoothedComp;
+            float smoothTime;
+            if (direction > 0.2f)       smoothTime = 0.10f;   // needs more comp — follow fast
+            else if (direction < -0.2f) smoothTime = 0.90f;   // returning/pause — visibly slow
+            else                        smoothTime = 0.15f;   // near target — gentle
 
-        const float k = std::exp(-(float)numSamples / (currentSampleRate * smoothTime));
-        rideSmoothedComp = rideSmoothedComp * k + target * (1.0f - k);
-        if (! std::isfinite(rideSmoothedComp)) rideSmoothedComp = target;
+            const float k = std::exp(-(float)numSamples / (currentSampleRate * smoothTime));
+            rideSmoothedComp = rideSmoothedComp * k + target * (1.0f - k);
+            if (! std::isfinite(rideSmoothedComp)) rideSmoothedComp = target;
+        }
 
         rideTargetComp.store(rideSmoothedComp);
         compDB = -rideSmoothedComp;
@@ -521,20 +482,6 @@ void SmartCompProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mi
             if (std::abs(left[i]) >= 1.0f || std::abs(right[i]) >= 1.0f) { inClip = true; break; }
         }
         inputClipping.store(inClip);
-
-        // 1. Signal HPF (coefficients cached — only recalc on change)
-        if (hpfFreq > 1.0f) {
-            if (std::abs(hpfFreq - lastHpfFreq) > 0.01f) {
-                // Written in place rather than via IIR::Coefficients::makeHighPass,
-                // which returns a ReferenceCountedObjectPtr: that allocated and
-                // freed on the audio thread on every block of an HPF automation
-                // ramp, and malloc can block. Same RBJ high-pass design, Q=1/sqrt(2).
-                setHighPassCoefficients(*sigHpFilter.state, currentSampleRate, hpfFreq);
-                lastHpfFreq = hpfFreq;
-            }
-            juce::dsp::AudioBlock<float> block(buffer);
-            sigHpFilter.process(juce::dsp::ProcessContextReplacing<float>(block));
-        }
 
         // (Sidechain HPF is handled internally by the compressor's detector)
 

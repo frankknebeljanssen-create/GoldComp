@@ -2,9 +2,10 @@
 // (no editor, no audio device) through three cases that were all broken when
 // AUTO tracked an offset from the knob instead of an absolute target:
 //   1. switching AUTO on glides the knob into the sweet-spot band
-//   2. dragging the knob away while AUTO stays on springs it back
+//   2. dragging the knob away holds it there while the drag is live, then
+//      releasing it glides back — visibly, not a snap
 //   3. parking the knob in the red with AUTO off, then re-enabling AUTO,
-//      recovers fully rather than getting stuck partway (the old ±18 offset
+//      recovers fully rather than getting stuck partway (the old +-18 offset
 //      clamp made this mathematically impossible from a knob far enough out)
 //
 // Build:  cmake --build <builddir> --target auto_probe
@@ -40,43 +41,54 @@ int main() {
 
     juce::AudioBuffer<float> buf(2, BS);
     juce::MidiBuffer midi;
-    auto run = [&](int blocks) {
+
+    // Mirrors what the editor actually does each UI frame: tell the audio
+    // thread whether the user is dragging (every frame, unconditionally), and
+    // when AUTO is on and the user is NOT dragging, push rideTargetComp into
+    // the real "comp" parameter. ~3 blocks per tick approximates the editor's
+    // 30Hz timer against a 512-sample block at 44.1kHz (~34.8ms).
+    auto run = [&](int blocks, bool dragging) {
         for (int b = 0; b < blocks; ++b) {
             fill(buf.getWritePointer(0), buf.getWritePointer(1), BS);
+            p.compKnobDragging.store(dragging);
             p.processBlock(buf, midi);
-            // emulate the editor's 30Hz pull: every ~3 blocks
-            if (p.rideMode.load() && b % 3 == 0)
+            if (p.rideMode.load() && ! dragging && b % 3 == 0)
                 comp->setValueNotifyingHost(p.rideTargetComp.load() / 36.0f);
         }
     };
 
     std::printf("AUTO off, knob at 0. Warming up analysis...\n");
-    run(200);
+    run(200, false);
     std::printf("  sweet spot: %.1f .. %.1f   knob %.1f\n",
         p.sweetSpotLow.load(), p.sweetSpotHigh.load(), compVal());
 
     std::printf("\n[1] Switch AUTO on -> should glide into the sweet spot\n");
     p.rideMode.store(true);
-    for (int step = 0; step < 5; ++step) { run(20); 
+    for (int step = 0; step < 5; ++step) { run(20, false);
         std::printf("  after %2d blocks: knob %5.2f  (band %.1f..%.1f)\n",
             (step+1)*20, compVal(), p.sweetSpotLow.load(), p.sweetSpotHigh.load()); }
 
-    std::printf("\n[2] Drag knob to 34 (crush) with AUTO still on -> should spring back\n");
+    std::printf("\n[2] Drag to 34 (crush) with AUTO on: must hold while dragging, "
+                "then glide back visibly on release\n");
     comp->setValueNotifyingHost(34.0f / 36.0f);
-    std::printf("  immediately after drag: knob %5.2f\n", compVal());
-    for (int step = 0; step < 5; ++step) { run(20);
-        std::printf("  after %2d blocks: knob %5.2f\n", (step+1)*20, compVal()); }
+    p.compKnobDragging.store(true);
+    run(15, true);   // hold the drag — should stay pinned near 34, not drift toward the sweet spot
+    std::printf("  still dragging, after 15 blocks: knob %5.2f  (should still be ~34)\n", compVal());
+    std::printf("  release -> glide back:\n");
+    for (int step = 0; step < 15; ++step) { run(20, false);
+        std::printf("  after %3d blocks (%.2fs): knob %5.2f\n",
+            (step+1)*20, (step+1)*20*BS/SR, compVal()); }
 
     std::printf("\n[3] AUTO off, drag to 34, AUTO back on -> must recover, not stick\n");
     p.rideMode.store(false);
-    run(30);
+    run(30, false);
     comp->setValueNotifyingHost(34.0f / 36.0f);
-    run(30);
+    run(30, false);
     std::printf("  AUTO off, knob parked at %5.2f\n", compVal());
     p.rideMode.store(true);
-    for (int step = 0; step < 6; ++step) { run(20);
-        std::printf("  after %2d blocks: knob %5.2f  (band %.1f..%.1f)\n",
-            (step+1)*20, compVal(), p.sweetSpotLow.load(), p.sweetSpotHigh.load()); }
+    for (int step = 0; step < 20; ++step) { run(20, false);
+        std::printf("  after %3d blocks (%.2fs): knob %5.2f  (band %.1f..%.1f)\n",
+            (step+1)*20, (step+1)*20*BS/SR, compVal(), p.sweetSpotLow.load(), p.sweetSpotHigh.load()); }
 
     float lo = p.sweetSpotLow.load(), hi = p.sweetSpotHigh.load(), v = compVal();
     std::printf("\nRESULT: %s\n", (v >= lo - 0.5f && v <= hi + 0.5f)

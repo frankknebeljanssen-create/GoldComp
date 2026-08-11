@@ -28,10 +28,10 @@ public:
 
     SmartCompProcessor& processor;
 
-    juce::Slider compSlider, gainSlider, gateSlider, hpfSlider, mixSlider;
-    juce::Label compLabel, gainLabel, gateLabel, hpfLabel, mixLabel;
+    juce::Slider compSlider, gainSlider, gateSlider, mixSlider;
+    juce::Label compLabel, gainLabel, gateLabel, mixLabel;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
-        compAttach, gainAttach, gateAttach, hpfAttach, mixAttach;
+        compAttach, gainAttach, gateAttach, mixAttach;
 
     juce::ToggleButton bypassBtn;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> bypassAttach;

@@ -58,6 +58,12 @@ public:
     // each frame (when the user isn't actively dragging), so the knob you see is
     // always the value actually driving the compressor, not a separate display.
     std::atomic<float> rideTargetComp { 0.0f };
+    // Set by the editor each frame from compSlider.isMouseButtonDown(). While
+    // true, AUTO's internal target tracks the live knob 1:1 instead of gliding
+    // toward the sweet spot — otherwise it kept converging silently in the
+    // background during a drag, so by the time the user let go it had often
+    // already arrived, and the release looked like a snap instead of a glide.
+    std::atomic<bool> compKnobDragging { false };
 
     // Signal analysis for Sweet Spot / Confidence features
     std::atomic<float> inputDynamicRange { 0.0f };   // smoothed crest factor (dB)
@@ -77,18 +83,11 @@ private:
     juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
     LookaheadLimiter limiter;
 
-    using HPFilter = juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>, juce::dsp::IIR::Coefficients<float>>;
-    HPFilter sigHpFilter;
-
     double currentSampleRate = 44100.0;
-    float lastHpfFreq = -1.0f;
 
     // JUCE's second ctor argument is an exponent: 2^n times oversampling.
     juce::dsp::Oversampling<float> compOS { 2, 1, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true };     // 2x for compressor
     static constexpr int compOSFactor = 2;   // must match compOS above
-
-    static void setHighPassCoefficients(juce::dsp::IIR::Coefficients<float>& c,
-                                        double sampleRate, float freq);
 
     // DC blocker
     float dcBlockL = 0.0f, dcBlockR = 0.0f;
@@ -117,7 +116,6 @@ private:
     float prevMixWet = 1.0f;
     float prevOutTrimLin = 1.0f;
     float smoothedMakeupGR = 0.0f;   // slow average of delivered GR, drives makeup
-    float smoothedHpfFreq = 0.0f;    // anti-zipper for the HPF coefficient swap
 
     // K-weighted loudness (LUFS) for gain match
     // Stage 1: high-shelf +4dB @ 1681Hz (pre-filter)

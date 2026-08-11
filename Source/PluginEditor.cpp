@@ -193,7 +193,7 @@ void SmartCompEditor::SmartCompLookAndFeel::drawRotarySlider(
     juce::String name = slider.getName();
     g.setFont(juce::Font("Arial", 11.0f, juce::Font::plain));
     g.setColour(C::white);
-    if (name == "HP Filter" || name == "SC HPF") {
+    if (name == "SC HPF") {
         g.drawText(val < 1 ? "OFF" : juce::String(val), x, y, width, height, juce::Justification::centred);
     } else if (name == "Gate") {
         g.drawText(val <= -79 ? "OFF" : juce::String(val), x, y, width, height, juce::Justification::centred);
@@ -263,14 +263,12 @@ SmartCompEditor::SmartCompEditor(SmartCompProcessor& p)
     };
     setup(inTrimSlider, inTrimLabel, "In Trim", "IN TRIM");
     setup(gainSlider, gainLabel, "Gain", "OUT GAIN");
-    setup(hpfSlider, hpfLabel, "HP Filter", "HPF");
     setup(mixSlider, mixLabel, "Mix", "MIX");
 
     // Double-click reset
     compSlider.setDoubleClickReturnValue(true, 0.0f);
     inTrimSlider.setDoubleClickReturnValue(true, 0.0f);
     gainSlider.setDoubleClickReturnValue(true, 0.0f);
-    hpfSlider.setDoubleClickReturnValue(true, 0.0f);
     mixSlider.setDoubleClickReturnValue(true, 100.0f);
 
     // Attachments
@@ -278,7 +276,6 @@ SmartCompEditor::SmartCompEditor(SmartCompProcessor& p)
     gateAttach  = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.apvts, "gate",  gateSlider);
     inTrimAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.apvts, "inTrim", inTrimSlider);
     gainAttach  = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.apvts, "gain",  gainSlider);
-    hpfAttach   = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.apvts, "hpf",   hpfSlider);
     mixAttach   = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.apvts, "mix",   mixSlider);
 
 
@@ -326,11 +323,19 @@ void SmartCompEditor::timerCallback()
     bal(displayInL, processor.inputPeakL.load()); bal(displayInR, processor.inputPeakR.load());
     bal(displayOutL, processor.outputPeakL.load()); bal(displayOutR, processor.outputPeakR.load());
 
+    // Tell the audio thread whether the user is actively dragging, every frame
+    // regardless of AUTO's state — the DSP side uses this to pin its internal
+    // target to the live knob during a drag rather than gliding in the
+    // background, so the return-to-sweet-spot always starts from wherever the
+    // user actually let go.
+    const bool draggingComp = compSlider.isMouseButtonDown();
+    processor.compKnobDragging.store(draggingComp);
+
     // AUTO drives the real knob, so what you see is always what the compressor
     // is using. While the user is dragging we leave it alone — release the
-    // mouse and it springs back to the sweet spot rather than sitting wherever
+    // mouse and it glides back to the sweet spot rather than sitting wherever
     // it was let go.
-    if (processor.rideMode.load() && ! compSlider.isMouseButtonDown())
+    if (processor.rideMode.load() && ! draggingComp)
     {
         const float target = processor.rideTargetComp.load();
         if (std::abs((float)compSlider.getValue() - target) > 0.01f)
@@ -368,11 +373,8 @@ void SmartCompEditor::timerCallback()
 
     // Update ADV knob labels — unit only (value shown inside knob)
     if (advOpen) {
-        float hpfVal = processor.apvts.getRawParameterValue("hpf")->load();
-
         float gateVal = processor.apvts.getRawParameterValue("gate")->load();
         gateLabel.setText(gateVal <= -79.5f ? "OFF" : "dB", juce::dontSendNotification);
-        hpfLabel.setText(hpfVal < 1.0f ? "OFF" : "Hz", juce::dontSendNotification);
         float scHpfVal = processor.apvts.getRawParameterValue("schpf")->load();
         scHpfLabel.setText(scHpfVal < 1.0f ? "OFF" : "Hz", juce::dontSendNotification);
     }
@@ -387,7 +389,6 @@ void SmartCompEditor::timerCallback()
             if (compSlider.getBounds().contains(p)) hoveredElement = "comp";
             else if (inTrimSlider.getBounds().contains(p)) hoveredElement = "intrim";
             else if (gainSlider.getBounds().contains(p)) hoveredElement = "gain";
-            else if (hpfSlider.isVisible() && hpfSlider.getBounds().contains(p)) hoveredElement = "hpf";
             else if (mixSlider.getBounds().contains(p)) hoveredElement = "mix";
             else if (gateSlider.isVisible() && gateSlider.getBounds().contains(p)) hoveredElement = "gate";
             else if (scHpfSlider.isVisible() && scHpfSlider.getBounds().contains(p)) hoveredElement = "schpf";
@@ -406,7 +407,6 @@ void SmartCompEditor::timerCallback()
     float knobAlpha = bypassed ? 0.3f : 1.0f;
     gateSlider.setAlpha(knobAlpha); gainSlider.setAlpha(knobAlpha); mixSlider.setAlpha(knobAlpha);
     scHpfSlider.setAlpha(knobAlpha);
-    hpfSlider.setAlpha(knobAlpha);
     inTrimSlider.setAlpha(knobAlpha);
 
     repaint();
@@ -927,24 +927,23 @@ void SmartCompEditor::paint(juce::Graphics& g)
 
         // Knob labels + knobs. The left 66px used to hold the Delta and A/B
         // pills; with those gone the knobs use the full panel width.
+        // Two knobs now that HPF is gone — Gate and SC HPF are the only ADV
+        // controls left, so they get half the panel width each instead of a third.
         int knobAreaLeft = panelInnerX + 8;
         int knobAreaRight = panelInnerX + panelInnerW;
         int knobAreaW2 = knobAreaRight - knobAreaLeft;
-        int colW = knobAreaW2 / 3;
+        int colW = knobAreaW2 / 2;
         int row1Y = knobTopY;
         g.setFont(juce::Font("Arial", 10.0f, juce::Font::bold));
         g.setColour(C::label.brighter(0.3f));
         g.drawText("GATE", knobAreaLeft, row1Y - 14, colW, 12, juce::Justification::centred);
-        g.drawText("HPF", knobAreaLeft + colW, row1Y - 14, colW, 12, juce::Justification::centred);
-        g.drawText("SC HPF", knobAreaLeft + colW * 2, row1Y - 14, colW, 12, juce::Justification::centred);
+        g.drawText("SC HPF", knobAreaLeft + colW, row1Y - 14, colW, 12, juce::Justification::centred);
 
-        hpfSlider.setVisible(true); hpfLabel.setVisible(true);
         gateSlider.setVisible(true); gateLabel.setVisible(true);
         scHpfSlider.setVisible(true); scHpfLabel.setVisible(true);
     }
     else
     {
-        hpfSlider.setVisible(false); hpfLabel.setVisible(false);
         gateSlider.setVisible(false); gateLabel.setVisible(false);
         scHpfSlider.setVisible(false); scHpfLabel.setVisible(false);
     }
@@ -1007,7 +1006,6 @@ void SmartCompEditor::paint(juce::Graphics& g)
             if (hoveredElement == "comp") elBounds = unscaleRect(compSlider.getBounds());
             else if (hoveredElement == "gate") elBounds = unscaleRect(gateSlider.getBounds());
             else if (hoveredElement == "gain") elBounds = unscaleRect(gainSlider.getBounds());
-            else if (hoveredElement == "hpf") elBounds = unscaleRect(hpfSlider.getBounds());
             else if (hoveredElement == "mix") elBounds = unscaleRect(mixSlider.getBounds());
             else if (hoveredElement == "intrim") elBounds = unscaleRect(inTrimSlider.getBounds());
             else if (hoveredElement == "schpf") elBounds = unscaleRect(scHpfSlider.getBounds());
@@ -1073,7 +1071,7 @@ void SmartCompEditor::paint(juce::Graphics& g)
 // ============== INFO OVERLAY ==============
 void SmartCompEditor::setControlsInteractive(bool on)
 {
-    for (auto* s : { &compSlider, &gateSlider, &gainSlider, &hpfSlider,
+    for (auto* s : { &compSlider, &gateSlider, &gainSlider,
                      &mixSlider, &inTrimSlider, &scHpfSlider })
         s->setInterceptsMouseClicks(on, on);
     bypassBtn.setInterceptsMouseClicks(on, on);
@@ -1762,11 +1760,10 @@ void SmartCompEditor::resized()
     placeKnob(gainSlider, gainLabel, 2);
 
     if (!advOpen) {
-        hpfSlider.setVisible(false); hpfLabel.setVisible(false);
         gateSlider.setVisible(false); gateLabel.setVisible(false);
     }
 
-    // ADV panel
+    // ADV panel — two knobs (Gate, SC HPF) since HPF was removed
     if (advOpen) {
         int panelTopY = L.panelY;
         int advKnobSz = 56;
@@ -1775,7 +1772,7 @@ void SmartCompEditor::resized()
         int knobAreaLeft = panelX + 8;
         int knobAreaRight = panelX + advPanelW;
         int knobAreaW2 = knobAreaRight - knobAreaLeft;
-        int colW = knobAreaW2 / 3;
+        int colW = knobAreaW2 / 2;
 
         int knobBlockH = advKnobSz + 2 + 14;
         int knobTopY = panelTopY + (L.panelH - knobBlockH) / 2 + 6;
@@ -1787,11 +1784,9 @@ void SmartCompEditor::resized()
         };
 
         placeAdvKnob(gateSlider, gateLabel, 0);
-        placeAdvKnob(hpfSlider, hpfLabel, 1);
-        placeAdvKnob(scHpfSlider, scHpfLabel, 2);
+        placeAdvKnob(scHpfSlider, scHpfLabel, 1);
 
         gateSlider.setVisible(true); gateLabel.setVisible(true);
-        hpfSlider.setVisible(true); hpfLabel.setVisible(true);
         scHpfSlider.setVisible(true); scHpfLabel.setVisible(true);
     }
 }
@@ -1827,12 +1822,6 @@ SmartCompEditor::TooltipInfo SmartCompEditor::getTooltipFor(const juce::String& 
         "Manual output level adjustment applied after compression, "
         "limiter stages. Additive to auto-makeup gain.",
         "Range: -36 to 0 dB | Post-limiter in signal chain"
-    };
-    if (el == "hpf") return {
-        "High-Pass Filter",
-        "Removes low-frequency content before compression. "
-        "Reduces sensitivity to plosives, rumble, and proximity effect.",
-        "Type: 12 dB/oct Butterworth | Range: OFF to 300 Hz"
     };
     if (el == "mix") return {
         "Dry/Wet Mix",
@@ -1893,7 +1882,7 @@ SmartCompEditor::TooltipInfo SmartCompEditor::getTooltipFor(const juce::String& 
     };
     if (el == "adv") return {
         "Advanced Panel",
-        "Additional controls: Gate, HPF and Sidechain HPF.",
+        "Additional controls: Gate and Sidechain HPF.",
         "All settings are saved with the DAW session"
     };
     if (el == "meters") return {
